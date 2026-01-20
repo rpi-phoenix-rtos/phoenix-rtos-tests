@@ -1,0 +1,12 @@
+test:
+  type: unity
+  tests:
+    - name: sem
+      execute: test-posix-sem
+      targets:
+        exclude: [
+          armv7m7-imxrt106x-evk,
+          armv7m7-imxrt117x-evk,
+          armv7m4-stm32l4x6-nucleo,
+          armv7r5f-zynqmp-qemu
+          ]
