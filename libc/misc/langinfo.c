@@ -35,7 +35,8 @@ TEST_TEAR_DOWN(langinfo)
 
 TEST(langinfo, codeset)
 {
-	TEST_ASSERT_EQUAL_STRING("UTF-8", nl_langinfo(CODESET));
+	/* C/POSIX locale: ASCII, since the multibyte layer has no UTF-8 decoder. */
+	TEST_ASSERT_EQUAL_STRING("ANSI_X3.4-1968", nl_langinfo(CODESET));
 }
 
 
