@@ -148,6 +148,22 @@ TEST(stdio_fopenfclose, stdio_fopenfclose_wrongflags)
 	// assert_fopen_error(STDIO_TEST_FILENAME, NULL, EINVAL);
 }
 
+
+TEST(stdio_fopenfclose, stdio_fopenfclose_modemodifiers)
+{
+	/* 'b' (binary) and 't' (text) are POSIX no-ops but must be accepted in any
+	 * position; "rt" in particular previously failed (the mode parser rejected
+	 * 't'), which broke callers like libXfont2's fdopen(fd, "rt"). */
+	assert_fopen_success(STDIO_TEST_FILENAME, "w");
+	assert_fopen_success(STDIO_TEST_FILENAME, "rt");
+	assert_fopen_success(STDIO_TEST_FILENAME, "rb");
+	assert_fopen_success(STDIO_TEST_FILENAME, "r+b");
+	assert_fopen_success(STDIO_TEST_FILENAME, "rbt");
+	assert_fopen_success(STDIO_TEST_FILENAME, "wt");
+	/* an unknown modifier is still an invalid mode */
+	assert_fopen_error(STDIO_TEST_FILENAME, "rq", EINVAL);
+}
+
 TEST(stdio_fopenfclose, stdio_fopenfclose_toolongname)
 {
 	/* open file with too long name */
@@ -209,6 +225,7 @@ TEST_GROUP_RUNNER(stdio_fopenfclose)
 	RUN_TEST_CASE(stdio_fopenfclose, stdio_fopenfclose_opendir);
 	RUN_TEST_CASE(stdio_fopenfclose, stdio_fopenfclose_zeropath);
 	RUN_TEST_CASE(stdio_fopenfclose, stdio_fopenfclose_wrongflags);
+	RUN_TEST_CASE(stdio_fopenfclose, stdio_fopenfclose_modemodifiers);
 	RUN_TEST_CASE(stdio_fopenfclose, stdio_fopenfclose_toolongname);
 	RUN_TEST_CASE(stdio_fopenfclose, freopen_file);
 	RUN_TEST_CASE(stdio_fopenfclose, fdopen_file)

@@ -27,6 +27,7 @@ void runner(void)
 	RUN_TEST_GROUP(string_memmove_big);
 	RUN_TEST_GROUP(string_memcpy);
 	RUN_TEST_GROUP(string_memccpy);
+	RUN_TEST_GROUP(string_memmem);
 	RUN_TEST_GROUP(string_strncpy);
 	RUN_TEST_GROUP(string_stpncpy);
 	RUN_TEST_GROUP(string_strcpy_stpcpy);

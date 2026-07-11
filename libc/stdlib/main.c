@@ -24,6 +24,7 @@ void runner(void)
 	RUN_TEST_GROUP(stdlib_env);
 	RUN_TEST_GROUP(stdlib_bsearch);
 	RUN_TEST_GROUP(stdlib_strto);
+	RUN_TEST_GROUP(stdlib_getsubopt);
 }
 
 
