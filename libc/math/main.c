@@ -26,6 +26,7 @@ void runner(void)
 	RUN_TEST_GROUP(static_vector);
 	RUN_TEST_GROUP(math_abs);
 	RUN_TEST_GROUP(math_frac);
+	RUN_TEST_GROUP(math_round);
 	RUN_TEST_GROUP(math_exp);
 	RUN_TEST_GROUP(math_pow);
 	RUN_TEST_GROUP(math_trig);
