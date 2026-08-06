@@ -29,6 +29,7 @@ void runner(void)
 	RUN_TEST_GROUP(math_round);
 	RUN_TEST_GROUP(math_exp);
 	RUN_TEST_GROUP(math_pow);
+	RUN_TEST_GROUP(math_erf);
 	RUN_TEST_GROUP(math_trig);
 	RUN_TEST_GROUP(math_hyper);
 }
