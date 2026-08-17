@@ -32,6 +32,7 @@ void runner(void)
 	RUN_TEST_GROUP(math_erf);
 	RUN_TEST_GROUP(math_trig);
 	RUN_TEST_GROUP(math_hyper);
+	RUN_TEST_GROUP(math_c99extra);
 }
 
 
