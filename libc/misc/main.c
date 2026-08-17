@@ -44,6 +44,7 @@ void runner(void)
 	/* tests libphoenix internal functions */
 	RUN_TEST_GROUP(unistd_file_safe);
 	RUN_TEST_GROUP(unistd_file_safe_pread);
+	RUN_TEST_GROUP(unistd_sysconf);
 #endif
 }
 

@@ -159,11 +159,7 @@ TEST(stdlib_alloc, malloc_zero)
 {
 	void *ptr;
 	ptr = malloc(0);
-#ifdef __phoenix__
-	TEST_ASSERT_NULL(ptr);
-#else
-	TEST_ASSERT_NOT_NULL(ptr);
-#endif
+	TEST_ASSERT_NOT_NULL(ptr); /* libphoenix malloc(0)!=NULL, glibc-compat (6465a4a) */
 	free(ptr);
 }
 
@@ -207,25 +203,13 @@ TEST(stdlib_alloc, calloc_basic)
 TEST(stdlib_alloc, calloc_zero)
 {
 	int *ptr = calloc(0, sizeof(int));
-#ifdef __phoenix__
-	TEST_ASSERT_NULL(ptr);
-#else
-	TEST_ASSERT_NOT_NULL(ptr);
-#endif
+	TEST_ASSERT_NOT_NULL(ptr); /* libphoenix malloc(0)!=NULL, glibc-compat (6465a4a) */
 
 	int *ptr1 = calloc(BLOCK_SIZE, 0);
-#ifdef __phoenix__
-	TEST_ASSERT_NULL(ptr1);
-#else
-	TEST_ASSERT_NOT_NULL(ptr1);
-#endif
+	TEST_ASSERT_NOT_NULL(ptr1); /* libphoenix malloc(0)!=NULL, glibc-compat (6465a4a) */
 
 	int *ptr2 = calloc(0, 0);
-#ifdef __phoenix__
-	TEST_ASSERT_NULL(ptr2);
-#else
-	TEST_ASSERT_NOT_NULL(ptr2);
-#endif
+	TEST_ASSERT_NOT_NULL(ptr2); /* libphoenix malloc(0)!=NULL, glibc-compat (6465a4a) */
 
 	free(ptr);
 	free(ptr1);
