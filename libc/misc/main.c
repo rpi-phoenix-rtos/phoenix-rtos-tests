@@ -46,6 +46,7 @@ void runner(void)
 	RUN_TEST_GROUP(unistd_file_safe_pread);
 	RUN_TEST_GROUP(unistd_sysconf);
 	RUN_TEST_GROUP(resource_limits);
+	RUN_TEST_GROUP(statfs_basic);
 #endif
 }
 
