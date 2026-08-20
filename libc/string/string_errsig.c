@@ -84,6 +84,27 @@ TEST(string_errsign, strerror_zero)
 }
 
 
+/* strerror() must return the human-readable POSIX message, not the bare errno
+ * macro name (regression guard: strerror(ENOENT) used to return "ENOENT"). */
+TEST(string_errsign, strerror_posix_text)
+{
+	errno = 0;
+	TEST_ASSERT_EQUAL_STRING("Success", strerror(0));
+	TEST_ASSERT_EQUAL_STRING("Operation not permitted", strerror(EPERM));
+	TEST_ASSERT_EQUAL_STRING("No such file or directory", strerror(ENOENT));
+	TEST_ASSERT_EQUAL_STRING("Argument list too long", strerror(E2BIG));
+	TEST_ASSERT_EQUAL_STRING("Cannot allocate memory", strerror(ENOMEM));
+	TEST_ASSERT_EQUAL_STRING("Permission denied", strerror(EACCES));
+	TEST_ASSERT_EQUAL_STRING("Invalid argument", strerror(EINVAL));
+	TEST_ASSERT_EQUAL_STRING("Numerical result out of range", strerror(ERANGE));
+
+	/* The message must not be the macro name itself. */
+	TEST_ASSERT_NOT_EQUAL_INT(0, strcmp("ENOENT", strerror(ENOENT)));
+	TEST_ASSERT_NOT_EQUAL_INT(0, strcmp("EINVAL", strerror(EINVAL)));
+	TEST_ASSERT_EQUAL_INT(0, errno);
+}
+
+
 TEST(string_errsign, strerror_r_basic)
 {
 	char prev_buf[MAX_LEN_STRING] = { 0 };
@@ -166,6 +187,7 @@ TEST_GROUP_RUNNER(string_errsign)
 {
 	RUN_TEST_CASE(string_errsign, strerror_basic);
 	RUN_TEST_CASE(string_errsign, strerror_zero);
+	RUN_TEST_CASE(string_errsign, strerror_posix_text);
 
 	RUN_TEST_CASE(string_errsign, strerror_r_basic);
 	RUN_TEST_CASE(string_errsign, strerror_r_zero);
