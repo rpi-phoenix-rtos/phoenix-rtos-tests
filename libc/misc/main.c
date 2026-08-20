@@ -48,6 +48,7 @@ void runner(void)
 	RUN_TEST_GROUP(resource_limits);
 	RUN_TEST_GROUP(statfs_basic);
 	RUN_TEST_GROUP(mlock_noswap);
+	RUN_TEST_GROUP(dlopen_self);
 #endif
 }
 
