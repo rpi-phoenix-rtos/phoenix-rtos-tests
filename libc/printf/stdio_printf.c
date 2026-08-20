@@ -2480,6 +2480,7 @@ void runner(void)
 	RUN_TEST_GROUP(stdio_printf_fega);
 	RUN_TEST_GROUP(stdio_printf_cspn);
 	RUN_TEST_GROUP(stdio_printf_rest);
+	RUN_TEST_GROUP(stdio_printf_sizing);
 }
 
 
