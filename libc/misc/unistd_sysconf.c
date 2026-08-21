@@ -42,7 +42,23 @@ TEST(unistd_sysconf, supported_names)
 }
 
 
+TEST(unistd_sysconf, nprocessors)
+{
+	long onln = sysconf(_SC_NPROCESSORS_ONLN);
+	long conf = sysconf(_SC_NPROCESSORS_CONF);
+
+	/* Was unimplemented (-1/EINVAL). Now returns the kernel SMP core count via
+	 * platformctl(pctl_cpucount). Must be a positive, sane count. */
+	TEST_ASSERT_GREATER_THAN_INT(0, onln);
+	TEST_ASSERT_GREATER_THAN_INT(0, conf);
+	TEST_ASSERT_TRUE(onln <= conf);
+	/* RPi4 (BCM2711) is a 4-core Cortex-A72; Phoenix runs 4-core SMP. */
+	TEST_ASSERT_EQUAL_INT(4, (int)onln);
+}
+
+
 TEST_GROUP_RUNNER(unistd_sysconf)
 {
 	RUN_TEST_CASE(unistd_sysconf, supported_names);
+	RUN_TEST_CASE(unistd_sysconf, nprocessors);
 }
