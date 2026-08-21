@@ -400,3 +400,61 @@ TEST_GROUP_RUNNER(test_pthread_cleanup)
 	RUN_TEST_CASE(test_pthread_cleanup, pthread_cleanup_push_pop_exec);
 	RUN_TEST_CASE(test_pthread_cleanup, pthread_cleanup_push_pop_exec_pthread_exit);
 }
+
+
+TEST_GROUP(test_pthread_detach);
+
+
+TEST_SETUP(test_pthread_detach)
+{
+}
+
+
+TEST_TEAR_DOWN(test_pthread_detach)
+{
+}
+
+
+static void *test_detach_worker(void *arg)
+{
+	(void)arg;
+	return NULL;
+}
+
+
+TEST(test_pthread_detach, detach_stale_handle_no_uaf)
+{
+	pthread_t thread;
+	int rc;
+
+	/* A detached thread frees its own control block when it exits. Re-detaching
+	 * the now-stale handle must be rejected with an error, NOT crash with a
+	 * use-after-free (regression: libphoenix pthread_detach dereferenced the
+	 * freed ctx directly; it now validates the handle against the live list). */
+	TEST_ASSERT_EQUAL(0, pthread_create(&thread, NULL, test_detach_worker, NULL));
+	TEST_ASSERT_EQUAL(0, pthread_detach(thread));
+
+	/* Give the detached worker time to terminate and self-free its ctx. */
+	usleep(100000);
+
+	rc = pthread_detach(thread);
+	TEST_ASSERT_NOT_EQUAL(0, rc);
+}
+
+
+TEST(test_pthread_detach, detach_null_handle)
+{
+#ifdef __phoenix__
+	/* Phoenix rejects a NULL handle with ESRCH (glibc: UB, may fault). */
+	TEST_ASSERT_EQUAL(ESRCH, pthread_detach((pthread_t)0));
+#else
+	TEST_IGNORE_MESSAGE("pthread_detach(NULL) is undefined behaviour on glibc");
+#endif
+}
+
+
+TEST_GROUP_RUNNER(test_pthread_detach)
+{
+	RUN_TEST_CASE(test_pthread_detach, detach_stale_handle_no_uaf);
+	RUN_TEST_CASE(test_pthread_detach, detach_null_handle);
+}
