@@ -76,8 +76,62 @@ TEST(time_timeval, timerisset_basic)
 }
 
 
+TEST(time_timeval, timerclear_basic)
+{
+	struct timeval t = { .tv_sec = 42, .tv_usec = 999 };
+
+	timerclear(&t);
+	TEST_ASSERT_EQUAL_INT(0, t.tv_sec);
+	TEST_ASSERT_EQUAL_INT(0, t.tv_usec);
+	TEST_ASSERT_FALSE(timerisset(&t));
+}
+
+
+TEST(time_timeval, timeradd_carry)
+{
+	struct timeval r;
+	struct timeval c = { .tv_sec = 1, .tv_usec = 100000 };
+	struct timeval d = { .tv_sec = 2, .tv_usec = 200000 };
+	struct timeval a = { .tv_sec = 1, .tv_usec = 800000 };
+	struct timeval b = { .tv_sec = 2, .tv_usec = 300000 };
+
+	/* no carry */
+	timeradd(&c, &d, &r);
+	TEST_ASSERT_EQUAL_INT(3, r.tv_sec);
+	TEST_ASSERT_EQUAL_INT(300000, r.tv_usec);
+
+	/* tv_usec overflow carries into tv_sec (1.1e6 -> +1 sec, 0.1e6) */
+	timeradd(&a, &b, &r);
+	TEST_ASSERT_EQUAL_INT(4, r.tv_sec);
+	TEST_ASSERT_EQUAL_INT(100000, r.tv_usec);
+}
+
+
+TEST(time_timeval, timersub_borrow)
+{
+	struct timeval r;
+	struct timeval a = { .tv_sec = 5, .tv_usec = 500000 };
+	struct timeval b = { .tv_sec = 2, .tv_usec = 200000 };
+	struct timeval c = { .tv_sec = 5, .tv_usec = 100000 };
+	struct timeval d = { .tv_sec = 2, .tv_usec = 300000 };
+
+	/* no borrow */
+	timersub(&a, &b, &r);
+	TEST_ASSERT_EQUAL_INT(3, r.tv_sec);
+	TEST_ASSERT_EQUAL_INT(300000, r.tv_usec);
+
+	/* tv_usec underflow borrows from tv_sec (-0.2e6 -> -1 sec, 0.8e6) */
+	timersub(&c, &d, &r);
+	TEST_ASSERT_EQUAL_INT(2, r.tv_sec);
+	TEST_ASSERT_EQUAL_INT(800000, r.tv_usec);
+}
+
+
 TEST_GROUP_RUNNER(time_timeval)
 {
 	RUN_TEST_CASE(time_timeval, timercmp_lt_gt);
 	RUN_TEST_CASE(time_timeval, timerisset_basic);
+	RUN_TEST_CASE(time_timeval, timerclear_basic);
+	RUN_TEST_CASE(time_timeval, timeradd_carry);
+	RUN_TEST_CASE(time_timeval, timersub_borrow);
 }
