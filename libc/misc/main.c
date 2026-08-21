@@ -50,6 +50,7 @@ void runner(void)
 	RUN_TEST_GROUP(mlock_noswap);
 	RUN_TEST_GROUP(dlopen_self);
 	RUN_TEST_GROUP(misc_stubs_fixed);
+	RUN_TEST_GROUP(misc_rusage_times);
 #endif
 }
 
