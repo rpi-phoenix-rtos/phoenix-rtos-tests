@@ -49,6 +49,7 @@ void runner(void)
 	RUN_TEST_GROUP(statfs_basic);
 	RUN_TEST_GROUP(mlock_noswap);
 	RUN_TEST_GROUP(dlopen_self);
+	RUN_TEST_GROUP(misc_stubs_fixed);
 #endif
 }
 
