@@ -194,11 +194,38 @@ TEST(handler, unblock_pending_signal)
 /* TODO: test sa_flags - especially SA_NODEFER */
 
 
+/* siginterrupt(sig, flag) must round-trip through sigaction without dropping the
+ * installed handler, and reject an invalid signal. Regression for the
+ * declared-but-unimplemented libphoenix siginterrupt (needed by job-control-off
+ * bash, which compiles nojobs.c). */
+TEST(handler, siginterrupt_roundtrip)
+{
+	struct sigaction sa, old;
+
+	sa.sa_handler = sighandler;
+	sigemptyset(&sa.sa_mask);
+	sa.sa_flags = 0;
+	TEST_ASSERT_EQUAL_INT(0, sigaction(SIGUSR1, &sa, NULL));
+
+	/* valid signal: both interrupt (flag=1) and restart (flag=0) succeed */
+	TEST_ASSERT_EQUAL_INT(0, siginterrupt(SIGUSR1, 1));
+	TEST_ASSERT_EQUAL_INT(0, siginterrupt(SIGUSR1, 0));
+
+	/* the handler must survive the siginterrupt round-trip */
+	TEST_ASSERT_EQUAL_INT(0, sigaction(SIGUSR1, NULL, &old));
+	TEST_ASSERT_EQUAL_PTR((void *)sighandler, (void *)old.sa_handler);
+
+	/* invalid signal -> -1 */
+	TEST_ASSERT_EQUAL_INT(-1, siginterrupt(0, 0));
+}
+
+
 TEST_GROUP_RUNNER(handler)
 {
 	RUN_TEST_CASE(handler, sighandler_sa_mask);
 	RUN_TEST_CASE(handler, sighandler_signal_in_signal);
 	RUN_TEST_CASE(handler, unblock_pending_signal);
+	RUN_TEST_CASE(handler, siginterrupt_roundtrip);
 }
 
 
