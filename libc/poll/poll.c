@@ -18,6 +18,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/select.h>
+#include <sys/wait.h>
 #include <time.h>
 
 #include "unity_fixture.h"
@@ -106,9 +107,53 @@ TEST(test_poll, select_errnos)
 }
 
 
+/* Regression: select() with a NULL (infinite) timeout must BLOCK until a
+ * descriptor is ready, not return 0 immediately. A libphoenix bug clamped the
+ * NULL timeout to a 0 ms poll (returned 0 at once), which made GNU readline's
+ * blocking select() in rl_getc() abort -> interactive bash exited at its first
+ * prompt. Here a child writes to a pipe after a short delay; the parent's
+ * select(read-end, NULL) must block and then return 1 (readable). */
+TEST(test_poll, select_null_timeout_blocks)
+{
+	int fds[2];
+	pid_t pid;
+	fd_set rfds;
+	int rv;
+	char c;
+
+	TEST_ASSERT_EQUAL_INT(0, pipe(fds));
+
+	pid = fork();
+	TEST_ASSERT_TRUE(pid >= 0);
+	if (pid == 0) {
+		struct timespec ts = { 0, 200000000L }; /* 200 ms */
+		close(fds[0]);
+		nanosleep(&ts, NULL);
+		(void)write(fds[1], "x", 1);
+		close(fds[1]);
+		_exit(0);
+	}
+
+	close(fds[1]);
+	alarm(5); /* guard: if select(NULL) truly blocks forever, fail rather than hang the suite */
+	FD_ZERO(&rfds);
+	FD_SET(fds[0], &rfds);
+	rv = select(fds[0] + 1, &rfds, NULL, NULL, NULL); /* NULL timeout: must block, then return 1 */
+	alarm(0);
+
+	TEST_ASSERT_EQUAL_INT(1, rv); /* pre-fix bug returned 0 immediately */
+	TEST_ASSERT_TRUE(FD_ISSET(fds[0], &rfds));
+	TEST_ASSERT_EQUAL_INT(1, read(fds[0], &c, 1));
+
+	close(fds[0]);
+	waitpid(pid, NULL, 0);
+}
+
+
 TEST_GROUP_RUNNER(test_poll)
 {
 	RUN_TEST_CASE(test_poll, select_errnos);
+	RUN_TEST_CASE(test_poll, select_null_timeout_blocks);
 }
 
 
