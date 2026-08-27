@@ -1138,10 +1138,63 @@ TEST(stdlib_exit, atexit_two_nodes)
 }
 
 
+/* A page shared via copy-on-write after fork must stay isolated even when the
+ * child READS it before writing. A kernel page-fault handler that mis-derives the
+ * resolved page protection (e.g. mapping a read-faulted still-shared COW page
+ * writable, or dropping the USER bit on a kernel-mode user-copy fault) would let
+ * the child's later write land on the SHARED page and corrupt the parent's copy.
+ * This exercises that path directly (regression for the AF_UNIX-recv EL1 fault
+ * storm / COW protection-derivation fix in kernel vm/map.c map_pageFault). */
+static char cow_page[8192];
+
+TEST(unistd_exit, fork_cow_isolation)
+{
+	volatile char *p = cow_page;
+	size_t i, n = sizeof(cow_page);
+	pid_t pid;
+	int status;
+
+	for (i = 0; i < n; i++) {
+		cow_page[i] = (char)0x5a;
+	}
+
+	pid = fork();
+	TEST_ASSERT_TRUE(pid >= 0);
+	if (pid == 0) {
+		/* Child: read the whole page first (must still see the parent's 0x5a),
+		 * then write it (must COW into a private copy), then verify the private
+		 * copy. A nonzero exit fails the parent's assert below. */
+		for (i = 0; i < n; i++) {
+			if (p[i] != (char)0x5a) {
+				_exit(2);
+			}
+		}
+		for (i = 0; i < n; i++) {
+			p[i] = (char)0xa5;
+		}
+		for (i = 0; i < n; i++) {
+			if (p[i] != (char)0xa5) {
+				_exit(3);
+			}
+		}
+		_exit(0);
+	}
+
+	TEST_ASSERT_EQUAL_INT(pid, waitpid(pid, &status, 0));
+	TEST_ASSERT_TRUE(WIFEXITED(status));
+	TEST_ASSERT_EQUAL_INT(0, WEXITSTATUS(status));
+	/* The parent's copy MUST be untouched: the child's writes were private. */
+	for (i = 0; i < n; i++) {
+		TEST_ASSERT_EQUAL_HEX8(0x5a, cow_page[i]);
+	}
+}
+
+
 TEST_GROUP_RUNNER(unistd_exit)
 {
 	test_common.test_exitPtr = _exit;
 
+	RUN_TEST_CASE(unistd_exit, fork_cow_isolation);
 	RUN_TEST_CASE(unistd_exit, status_vals);
 	RUN_TEST_CASE(unistd_exit, exit_status_waitpid);
 	RUN_TEST_CASE(unistd_exit, chk_if_exits);
