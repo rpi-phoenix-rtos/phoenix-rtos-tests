@@ -458,3 +458,177 @@ TEST_GROUP_RUNNER(test_pthread_detach)
 	RUN_TEST_CASE(test_pthread_detach, detach_stale_handle_no_uaf);
 	RUN_TEST_CASE(test_pthread_detach, detach_null_handle);
 }
+
+
+/*
+ * New POSIX threading features carried by the 2026-08 upstream merge:
+ * pthread spinlocks (kernel-less atomic locks) and mutex attributes wired to
+ * the kernel's recursive/errorcheck/robust/priority-ceiling lock support
+ * (mutexCreateWithAttr). Coverage was previously absent.
+ */
+
+TEST_GROUP(test_pthread_newlocks);
+
+
+TEST_SETUP(test_pthread_newlocks)
+{
+}
+
+
+TEST_TEAR_DOWN(test_pthread_newlocks)
+{
+}
+
+
+#define NEWLOCKS_STACKSZ (64 * 1024) /* the 1-page pthread default is too small */
+
+static pthread_spinlock_t g_newlocks_spin;
+static unsigned long g_newlocks_counter;
+
+
+static int spawn_with_stack(pthread_t *t, void *(*fn)(void *), void *arg)
+{
+	pthread_attr_t attr;
+	int err = pthread_attr_init(&attr);
+	if (err != 0) {
+		return err;
+	}
+	(void)pthread_attr_setstacksize(&attr, NEWLOCKS_STACKSZ);
+	err = pthread_create(t, &attr, fn, arg);
+	pthread_attr_destroy(&attr);
+	return err;
+}
+
+
+TEST(test_pthread_newlocks, spin_lock_trylock_unlock)
+{
+	pthread_spinlock_t lock;
+
+	TEST_ASSERT_EQUAL_INT(0, pthread_spin_init(&lock, PTHREAD_PROCESS_PRIVATE));
+	TEST_ASSERT_EQUAL_INT(0, pthread_spin_lock(&lock));
+	/* trylock on a held spinlock must fail with EBUSY, not block. */
+	TEST_ASSERT_EQUAL_INT(EBUSY, pthread_spin_trylock(&lock));
+	TEST_ASSERT_EQUAL_INT(0, pthread_spin_unlock(&lock));
+	/* now free: trylock succeeds. */
+	TEST_ASSERT_EQUAL_INT(0, pthread_spin_trylock(&lock));
+	TEST_ASSERT_EQUAL_INT(0, pthread_spin_unlock(&lock));
+	TEST_ASSERT_EQUAL_INT(0, pthread_spin_destroy(&lock));
+}
+
+
+static void *spin_incrementer(void *arg)
+{
+	unsigned int iters = *(unsigned int *)arg;
+	unsigned int i;
+
+	for (i = 0; i < iters; ++i) {
+		pthread_spin_lock(&g_newlocks_spin);
+		/* Non-atomic read-modify-write: a working spinlock serializes it, so
+		 * no update is lost; a broken lock would drop increments under
+		 * contention from the other threads. */
+		unsigned long v = g_newlocks_counter;
+		g_newlocks_counter = v + 1;
+		pthread_spin_unlock(&g_newlocks_spin);
+	}
+	return NULL;
+}
+
+
+TEST(test_pthread_newlocks, spin_mutual_exclusion)
+{
+	enum { NTH = 4, ITERS = 4000 };
+	pthread_t th[NTH];
+	unsigned int iters = ITERS;
+	int i;
+
+	g_newlocks_counter = 0;
+	TEST_ASSERT_EQUAL_INT(0, pthread_spin_init(&g_newlocks_spin, PTHREAD_PROCESS_PRIVATE));
+
+	for (i = 0; i < NTH; ++i) {
+		TEST_ASSERT_EQUAL_INT(0, spawn_with_stack(&th[i], spin_incrementer, &iters));
+	}
+	for (i = 0; i < NTH; ++i) {
+		TEST_ASSERT_EQUAL_INT(0, pthread_join(th[i], NULL));
+	}
+
+	TEST_ASSERT_EQUAL_UINT(NTH * ITERS, g_newlocks_counter);
+	TEST_ASSERT_EQUAL_INT(0, pthread_spin_destroy(&g_newlocks_spin));
+}
+
+
+TEST(test_pthread_newlocks, mutex_recursive)
+{
+	pthread_mutexattr_t attr;
+	pthread_mutex_t m;
+
+	TEST_ASSERT_EQUAL_INT(0, pthread_mutexattr_init(&attr));
+	TEST_ASSERT_EQUAL_INT(0, pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE));
+	TEST_ASSERT_EQUAL_INT(0, pthread_mutex_init(&m, &attr));
+
+	/* The owner may relock a recursive mutex; it must unlock the same number
+	 * of times. A non-recursive mutex would deadlock on the second lock. */
+	TEST_ASSERT_EQUAL_INT(0, pthread_mutex_lock(&m));
+	TEST_ASSERT_EQUAL_INT(0, pthread_mutex_lock(&m));
+	TEST_ASSERT_EQUAL_INT(0, pthread_mutex_lock(&m));
+	TEST_ASSERT_EQUAL_INT(0, pthread_mutex_unlock(&m));
+	TEST_ASSERT_EQUAL_INT(0, pthread_mutex_unlock(&m));
+	TEST_ASSERT_EQUAL_INT(0, pthread_mutex_unlock(&m));
+
+	TEST_ASSERT_EQUAL_INT(0, pthread_mutex_destroy(&m));
+	TEST_ASSERT_EQUAL_INT(0, pthread_mutexattr_destroy(&attr));
+}
+
+
+TEST(test_pthread_newlocks, mutex_errorcheck_relock_edeadlk)
+{
+	pthread_mutexattr_t attr;
+	pthread_mutex_t m;
+
+	TEST_ASSERT_EQUAL_INT(0, pthread_mutexattr_init(&attr));
+	TEST_ASSERT_EQUAL_INT(0, pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_ERRORCHECK));
+	TEST_ASSERT_EQUAL_INT(0, pthread_mutex_init(&m, &attr));
+
+	TEST_ASSERT_EQUAL_INT(0, pthread_mutex_lock(&m));
+	/* Relocking by the owner returns EDEADLK instead of self-deadlocking. */
+	TEST_ASSERT_EQUAL_INT(EDEADLK, pthread_mutex_lock(&m));
+	TEST_ASSERT_EQUAL_INT(0, pthread_mutex_unlock(&m));
+
+	TEST_ASSERT_EQUAL_INT(0, pthread_mutex_destroy(&m));
+	TEST_ASSERT_EQUAL_INT(0, pthread_mutexattr_destroy(&attr));
+}
+
+
+TEST(test_pthread_newlocks, mutexattr_roundtrip)
+{
+	pthread_mutexattr_t attr;
+	int v;
+
+	TEST_ASSERT_EQUAL_INT(0, pthread_mutexattr_init(&attr));
+
+	TEST_ASSERT_EQUAL_INT(0, pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE));
+	v = -1;
+	TEST_ASSERT_EQUAL_INT(0, pthread_mutexattr_gettype(&attr, &v));
+	TEST_ASSERT_EQUAL_INT(PTHREAD_MUTEX_RECURSIVE, v);
+
+	TEST_ASSERT_EQUAL_INT(0, pthread_mutexattr_setprotocol(&attr, PTHREAD_PRIO_PROTECT));
+	v = -1;
+	TEST_ASSERT_EQUAL_INT(0, pthread_mutexattr_getprotocol(&attr, &v));
+	TEST_ASSERT_EQUAL_INT(PTHREAD_PRIO_PROTECT, v);
+
+	TEST_ASSERT_EQUAL_INT(0, pthread_mutexattr_setrobust(&attr, PTHREAD_MUTEX_ROBUST));
+	v = -1;
+	TEST_ASSERT_EQUAL_INT(0, pthread_mutexattr_getrobust(&attr, &v));
+	TEST_ASSERT_EQUAL_INT(PTHREAD_MUTEX_ROBUST, v);
+
+	TEST_ASSERT_EQUAL_INT(0, pthread_mutexattr_destroy(&attr));
+}
+
+
+TEST_GROUP_RUNNER(test_pthread_newlocks)
+{
+	RUN_TEST_CASE(test_pthread_newlocks, spin_lock_trylock_unlock);
+	RUN_TEST_CASE(test_pthread_newlocks, spin_mutual_exclusion);
+	RUN_TEST_CASE(test_pthread_newlocks, mutex_recursive);
+	RUN_TEST_CASE(test_pthread_newlocks, mutex_errorcheck_relock_edeadlk);
+	RUN_TEST_CASE(test_pthread_newlocks, mutexattr_roundtrip);
+}
