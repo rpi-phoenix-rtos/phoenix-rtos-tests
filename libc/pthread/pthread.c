@@ -484,6 +484,7 @@ TEST_TEAR_DOWN(test_pthread_newlocks)
 
 static pthread_spinlock_t g_newlocks_spin;
 static unsigned long g_newlocks_counter;
+static pthread_mutex_t g_newlocks_robust;
 
 
 static int spawn_with_stack(pthread_t *t, void *(*fn)(void *), void *arg)
@@ -624,6 +625,45 @@ TEST(test_pthread_newlocks, mutexattr_roundtrip)
 }
 
 
+static void *robust_killer(void *arg)
+{
+	(void)arg;
+	/* Lock the robust mutex and terminate while still holding it. The kernel
+	 * force-unlocks a dying thread's held locks and marks a robust one
+	 * inconsistent, so the next locker inherits it with EOWNERDEAD. */
+	pthread_mutex_lock(&g_newlocks_robust);
+	return NULL;
+}
+
+
+TEST(test_pthread_newlocks, mutex_robust_owner_death)
+{
+	pthread_mutexattr_t attr;
+	pthread_t th;
+
+	TEST_ASSERT_EQUAL_INT(0, pthread_mutexattr_init(&attr));
+	TEST_ASSERT_EQUAL_INT(0, pthread_mutexattr_setrobust(&attr, PTHREAD_MUTEX_ROBUST));
+	TEST_ASSERT_EQUAL_INT(0, pthread_mutex_init(&g_newlocks_robust, &attr));
+
+	/* A worker locks the robust mutex, then dies without unlocking. */
+	TEST_ASSERT_EQUAL_INT(0, spawn_with_stack(&th, robust_killer, NULL));
+	TEST_ASSERT_EQUAL_INT(0, pthread_join(th, NULL));
+
+	/* The next acquirer inherits the abandoned lock with EOWNERDEAD, must make
+	 * it consistent, then owns and releases it. */
+	TEST_ASSERT_EQUAL_INT(EOWNERDEAD, pthread_mutex_lock(&g_newlocks_robust));
+	TEST_ASSERT_EQUAL_INT(0, pthread_mutex_consistent(&g_newlocks_robust));
+	TEST_ASSERT_EQUAL_INT(0, pthread_mutex_unlock(&g_newlocks_robust));
+
+	/* Recovered: a fresh lock/unlock cycle now succeeds cleanly. */
+	TEST_ASSERT_EQUAL_INT(0, pthread_mutex_lock(&g_newlocks_robust));
+	TEST_ASSERT_EQUAL_INT(0, pthread_mutex_unlock(&g_newlocks_robust));
+
+	TEST_ASSERT_EQUAL_INT(0, pthread_mutex_destroy(&g_newlocks_robust));
+	TEST_ASSERT_EQUAL_INT(0, pthread_mutexattr_destroy(&attr));
+}
+
+
 TEST_GROUP_RUNNER(test_pthread_newlocks)
 {
 	RUN_TEST_CASE(test_pthread_newlocks, spin_lock_trylock_unlock);
@@ -631,4 +671,5 @@ TEST_GROUP_RUNNER(test_pthread_newlocks)
 	RUN_TEST_CASE(test_pthread_newlocks, mutex_recursive);
 	RUN_TEST_CASE(test_pthread_newlocks, mutex_errorcheck_relock_edeadlk);
 	RUN_TEST_CASE(test_pthread_newlocks, mutexattr_roundtrip);
+	RUN_TEST_CASE(test_pthread_newlocks, mutex_robust_owner_death);
 }
