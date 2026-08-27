@@ -71,7 +71,17 @@ static void *waiter_fn(void *arg)
 
 static int spawn_detached(pthread_t *t, void *(*fn)(void *), void *arg)
 {
-	int err = pthread_create(t, NULL, fn, arg);
+	/* libphoenix's default pthread stack is one page (ALIGN(PTHREAD_STACK_MIN,
+	 * PAGE_SIZE)), too small for the semaphoreDown()->condWait() syscall-wrapper
+	 * chain these waiters run - a NULL attr faults on stack access. Give each
+	 * waiter a modest explicit stack, as Phoenix pthread users are expected to. */
+	pthread_attr_t attr;
+	if (pthread_attr_init(&attr) != 0) {
+		return -1;
+	}
+	(void)pthread_attr_setstacksize(&attr, 64 * 1024);
+	int err = pthread_create(t, &attr, fn, arg);
+	pthread_attr_destroy(&attr);
 	if (err == 0) {
 		pthread_detach(*t);
 	}
