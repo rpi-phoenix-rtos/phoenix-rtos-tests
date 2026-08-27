@@ -321,6 +321,13 @@ TEST(stdlib_env, random)
 			}
 		}
 	}
+
+	/* Coverage sanity: the randomized run must have exercised every env
+	 * operation at least once (otherwise this test proves less than it looks). */
+	TEST_ASSERT_GREATER_THAN_UINT(0, clearenvCnt);
+	TEST_ASSERT_GREATER_THAN_UINT(0, putenvCnt);
+	TEST_ASSERT_GREATER_THAN_UINT(0, setenvCnt);
+	TEST_ASSERT_GREATER_THAN_UINT(0, unsetenvCnt);
 }
 
 
