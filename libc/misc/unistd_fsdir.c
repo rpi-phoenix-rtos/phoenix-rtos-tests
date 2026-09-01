@@ -240,26 +240,35 @@ TEST(unistd_fsdir, rmdir_notempty)
 
 TEST(unistd_fsdir, fchdir)
 {
-	/* Contract: fchdir() must NEVER report success without actually changing the
-	 * cwd. A false 0 return silently corrupts every caller that relies on it -- most
-	 * notably gnulib's save_cwd/fchdir/unlink emulation of unlinkat(), which then
-	 * unlinks in the wrong directory and breaks `rm -r`/fts (root-caused via the
-	 * coreutils test suite, tools/coreutils-maketest). libphoenix has no fd->path
-	 * map, so fchdir currently fails with ENOSYS; a future real implementation must
-	 * still honour this contract. We pin it with a regular-file fd: fchdir on a
-	 * non-directory must fail (the old stub wrongly returned 0) and leave cwd intact. */
+	/* fchdir() backed by the kernel fd->path record (open_file_t.path via sys_fdpath).
+	 * Two halves of the contract:
+	 *  (a) SUCCESS on a directory fd must actually change the cwd to that directory
+	 *      (a false 0 without a real chdir is what broke gnulib's unlinkat emulation
+	 *      and `rm -r`/fts -- root-caused via tools/coreutils-maketest);
+	 *  (b) a non-directory fd must fail and leave the cwd untouched. */
 	int fd, r;
 	char before[PATH_MAX], after[PATH_MAX];
 
 	TEST_ASSERT_NOT_NULL(getcwd(before, sizeof(before)));
 
+	/* (a) directory fd -> cwd really moves to "/" */
+	fd = open("/", O_RDONLY);
+	TEST_ASSERT_TRUE(fd >= 0);
+	errno = 0;
+	TEST_ASSERT_EQUAL_INT(0, fchdir(fd));
+	TEST_ASSERT_NOT_NULL(getcwd(after, sizeof(after)));
+	TEST_ASSERT_EQUAL_STRING("/", after);
+	close(fd);
+	TEST_ASSERT_EQUAL_INT(0, chdir(before)); /* restore cwd */
+
+	/* (b) regular-file fd -> must fail, cwd unchanged */
 	fd = open(FNAME, O_RDONLY); /* FNAME is created in TEST_SETUP */
 	TEST_ASSERT_TRUE(fd >= 0);
 
 	errno = 0;
 	r = fchdir(fd);
 	TEST_ASSERT_EQUAL_INT(-1, r);        /* must NOT falsely succeed on a file fd */
-	TEST_ASSERT_NOT_EQUAL_INT(0, errno); /* must set errno (ENOSYS now, ENOTDIR if implemented) */
+	TEST_ASSERT_NOT_EQUAL_INT(0, errno); /* must set errno (ENOTDIR) */
 
 	close(fd);
 
