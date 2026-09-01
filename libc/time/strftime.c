@@ -86,10 +86,6 @@ TEST(time_strftime, additional_format_chars)
 
 TEST(time_strftime, format_with_padding)
 {
-/* Disabled because of #351 issue: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/351 (point 2) */
-#ifdef __phoenix__
-	TEST_IGNORE_MESSAGE("#351 issue");
-#endif
 	for (int i = 0; i < SIZE_OF_TABLE(format_with_padding); i++) {
 		strftime_assert(&format_with_padding[i]);
 	}
