@@ -36,7 +36,7 @@ static struct {
 	unsigned allocslen;
 
 	struct {
-		char stack[1024] __attribute__ ((aligned(8)));
+		char stack[16384] __attribute__ ((aligned(8)));
 		unsigned seed, noallocs;
 
 		struct test_malloc_alloc {
