@@ -1278,9 +1278,6 @@ TEST(stdio_printf_x, tX)
 
 TEST(stdio_printf_x, X_out_of_bonds)
 {
-#ifdef __phoenix__
-	TEST_IGNORE();
-#endif
 	char expect[256] = { 0 };
 	char *buf = expect;
 	const char *format = "%hhX %hX";
