@@ -33,9 +33,17 @@ int test_condwait(void)
 	if (condCreate(&c) != EOK)
 		return -1;
 
+	/* condWait atomically releases the mutex while waiting, so (as with POSIX
+	 * pthread_cond_timedwait) the caller must hold it first -- otherwise the
+	 * kernel cannot unlock it and returns -EPERM instead of the -ETIME we test. */
+	if (mutexLock(m) != EOK)
+		return -1;
+
 	gettime(&then, NULL);
 	err = condWait(c, m, 1);
 	gettime(&now, NULL);
+
+	mutexUnlock(m);
 
 	printf("test_condwait: ret %d (%s) elapsed %llu [us]\n", err, strerror(err), now - then);
 	return now - then >= 1 && err == -ETIME ? 0 : -1;
