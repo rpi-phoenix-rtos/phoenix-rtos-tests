@@ -238,12 +238,33 @@ TEST(unistd_fsdir, rmdir_notempty)
 }
 
 
-IGNORE_TEST(unistd_fsdir, fchdir)
+TEST(unistd_fsdir, fchdir)
 {
-	/*
-		Declared but unimplemented in libphoenix
-		https://github.com/phoenix-rtos/phoenix-rtos-project/issues/280
-	*/
+	/* Contract: fchdir() must NEVER report success without actually changing the
+	 * cwd. A false 0 return silently corrupts every caller that relies on it -- most
+	 * notably gnulib's save_cwd/fchdir/unlink emulation of unlinkat(), which then
+	 * unlinks in the wrong directory and breaks `rm -r`/fts (root-caused via the
+	 * coreutils test suite, tools/coreutils-maketest). libphoenix has no fd->path
+	 * map, so fchdir currently fails with ENOSYS; a future real implementation must
+	 * still honour this contract. We pin it with a regular-file fd: fchdir on a
+	 * non-directory must fail (the old stub wrongly returned 0) and leave cwd intact. */
+	int fd, r;
+	char before[PATH_MAX], after[PATH_MAX];
+
+	TEST_ASSERT_NOT_NULL(getcwd(before, sizeof(before)));
+
+	fd = open(FNAME, O_RDONLY); /* FNAME is created in TEST_SETUP */
+	TEST_ASSERT_TRUE(fd >= 0);
+
+	errno = 0;
+	r = fchdir(fd);
+	TEST_ASSERT_EQUAL_INT(-1, r);        /* must NOT falsely succeed on a file fd */
+	TEST_ASSERT_NOT_EQUAL_INT(0, errno); /* must set errno (ENOSYS now, ENOTDIR if implemented) */
+
+	close(fd);
+
+	TEST_ASSERT_NOT_NULL(getcwd(after, sizeof(after)));
+	TEST_ASSERT_EQUAL_STRING(before, after); /* cwd unchanged */
 }
 
 
