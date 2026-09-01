@@ -302,9 +302,6 @@ TEST_TEAR_DOWN(string_tok_r)
 TEST(string_tok_r, basic)
 {
 	/* Ifdef used because lack of function 'strtok_r' */
-#ifdef __phoenix__
-	TEST_IGNORE();
-#else
 
 	/*
 	 * There needed to be two copies of the same element as strtok_r works
@@ -411,16 +408,12 @@ TEST(string_tok_r, basic)
 	TEST_ASSERT_EMPTY(restState1);
 	TEST_ASSERT_EMPTY(restState2);
 
-#endif
 }
 
 
 TEST(string_tok_r, torn)
 {
 	/* Ifdef used because lack of function 'strtok_r' */
-#ifdef __phoenix__
-	TEST_IGNORE();
-#else
 	char *rest;
 	char *tok;
 	char str[] = "Lor\0em ipsum";
@@ -433,16 +426,12 @@ TEST(string_tok_r, torn)
 	TEST_ASSERT_EQUAL_PTR(NULL, (tok = strtok_r(NULL, separators, &rest)));
 	TEST_ASSERT_NOT_NULL(rest);
 
-#endif
 }
 
 
 TEST(string_tok_r, empty_args)
 {
 	/* Ifdef used because lack of function 'strtok_r' */
-#ifdef __phoenix__
-	TEST_IGNORE();
-#else
 	char empty[] = { 0 };
 	char *rest;
 
@@ -457,16 +446,12 @@ TEST(string_tok_r, empty_args)
 	TEST_ASSERT_EQUAL_PTR(NULL, strtok_r(NULL, "", &rest));
 	TEST_ASSERT_NOT_NULL(rest);
 
-#endif
 }
 
 
 TEST(string_tok_r, multi_call)
 {
 	/* Ifdef used because lack of function 'strtok_r' */
-#ifdef __phoenix__
-	TEST_IGNORE();
-#else
 
 
 	char loremStr[20] = LOREM_IPSUM;
@@ -580,16 +565,12 @@ TEST(string_tok_r, multi_call)
 
 
 	free(asciiStr);
-#endif
 }
 
 
 TEST(string_tok_r, out_of_ascii)
 {
 	/* Ifdef used because lack of function 'strtok_r' */
-#ifdef __phoenix__
-	TEST_IGNORE();
-#else
 
 	char divider[6] = { 0 };
 	char separator[ASCII_LENGTH];
@@ -634,16 +615,12 @@ TEST(string_tok_r, out_of_ascii)
 	}
 
 	free(extAsciiStr);
-#endif
 }
 
 
 TEST(string_tok_r, same_state)
 {
 	/* Ifdef used because lack of function 'strtok_r' */
-#ifdef __phoenix__
-	TEST_IGNORE();
-#else
 
 	char *rest[ASCII_LENGTH] = { 0 },
 		 *asciiStr = testdata_createCharStr(ASCII_LENGTH);
@@ -662,15 +639,11 @@ TEST(string_tok_r, same_state)
 	}
 
 	free(asciiStr);
-#endif
 }
 
 TEST(string_tok_r, big_string)
 {
 	/* Ifdef used because lack of function 'strtok_r' */
-#ifdef __phoenix__
-	TEST_IGNORE();
-#else
 
 	char str[PATH_MAX];
 	char str1[PATH_MAX];
@@ -692,7 +665,6 @@ TEST(string_tok_r, big_string)
 		TEST_ASSERT_EQUAL_STRING("\2", strtok_r("\2", str, &rest[1]));
 		TEST_ASSERT_EQUAL_PTR(NULL, strtok_r(str1, str, &rest[1]));
 	}
-#endif
 }
 
 

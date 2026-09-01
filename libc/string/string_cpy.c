@@ -238,10 +238,6 @@ TEST_TEAR_DOWN(string_memccpy)
 TEST(string_memccpy, basic)
 {
 	/* Ifdef used because lack of function 'memccpy' */
-#ifdef __phoenix__
-	TEST_IGNORE();
-#endif
-#ifndef __phoenix__
 
 
 	char strDest[MAX_STR_LEN] = { 0 };
@@ -266,16 +262,11 @@ TEST(string_memccpy, basic)
 		TEST_ASSERT_EQUAL_CHAR('\0', strDest[i]);
 	}
 
-#endif
 }
 
 
 TEST(string_memccpy, stop_char_found)
 {
-#ifdef __phoenix__
-	TEST_IGNORE();
-#endif
-#ifndef __phoenix__
 
 	char bigStrDest[ALL_CHARS_STRING_SIZE] = { 0 };
 	const char *testStr;
@@ -293,16 +284,11 @@ TEST(string_memccpy, stop_char_found)
 
 	free((void *)testStr);
 
-#endif
 }
 
 
 TEST(string_memccpy, stop_int_found)
 {
-#ifdef __phoenix__
-	TEST_IGNORE();
-#endif
-#ifndef __phoenix__
 
 	const char *testStr;
 	char bigStrDest[ALL_CHARS_STRING_SIZE] = { 0 };
@@ -331,16 +317,11 @@ TEST(string_memccpy, stop_int_found)
 	}
 
 	free((void *)testStr);
-#endif
 }
 
 
 TEST(string_memccpy, data_types)
 {
-#ifdef __phoenix__
-	TEST_IGNORE();
-#endif
-#ifndef __phoenix__
 
 	int num = 12345678,
 		numDest = 0;
@@ -369,16 +350,11 @@ TEST(string_memccpy, data_types)
 	TEST_ASSERT_NOT_EMPTY(&sizDest);
 	TEST_ASSERT_EQUAL_DOUBLE(size, sizDest);
 
-#endif
 }
 
 
 TEST(string_memccpy, adjacent)
 {
-#ifdef __phoenix__
-	TEST_IGNORE();
-#endif
-#ifndef __phoenix__
 
 	char testStr[] = "TEST",
 		 memStr[MAX_STR_LEN] = "\0\0\0\0\0\0\0\0\0\0TEST",
@@ -401,16 +377,11 @@ TEST(string_memccpy, adjacent)
 	/* Checking if zeros before and after text are intact and text was copied correctly */
 	TEST_ASSERT_EQUAL_CHAR_ARRAY(memStr, expVal, sizeof(memStr));
 
-#endif
 }
 
 
 TEST(string_memccpy, one_byte)
 {
-#ifdef __phoenix__
-	TEST_IGNORE();
-#endif
-#ifndef __phoenix__
 
 	char testArray[CHARS_SET_SIZE] = { 0 },
 		 input[CHARS_SET_SIZE] = { 0 };
@@ -425,16 +396,11 @@ TEST(string_memccpy, one_byte)
 	/* Checking if all elements were correctly copied */
 	TEST_ASSERT_EQUAL_CHAR_ARRAY(input, testArray, CHARS_SET_SIZE);
 
-#endif
 }
 
 
 TEST(string_memccpy, clearing_array)
 {
-#ifdef __phoenix__
-	TEST_IGNORE();
-#endif
-#ifndef __phoenix__
 
 	char testArray[MAX_STR_LEN] = TEST_STR1,
 		 input[MAX_STR_LEN] = { 0 };
@@ -443,16 +409,11 @@ TEST(string_memccpy, clearing_array)
 	TEST_ASSERT_EQUAL_PTR(testArray, memcpy(testArray, input, MAX_STR_LEN));
 	TEST_ASSERT_EQUAL_CHAR_ARRAY(input, testArray, MAX_STR_LEN);
 
-#endif
 }
 
 
 TEST(string_memccpy, various_sizes)
 {
-#ifdef __phoenix__
-	TEST_IGNORE();
-#endif
-#ifndef __phoenix__
 
 
 	char testArray[MAX_STR_LEN] = TEST_STR1,
@@ -487,16 +448,11 @@ TEST(string_memccpy, various_sizes)
 	TEST_ASSERT_EQUAL_PTR(NULL, memccpy(testArray, input, 'x', sizeof(input) - 1));
 	TEST_ASSERT_EQUAL_CHAR_ARRAY(testArray, input, sizeof(input));
 
-#endif
 }
 
 
 TEST(string_memccpy, big)
 {
-#ifdef __phoenix__
-	TEST_IGNORE();
-#endif
-#ifndef __phoenix__
 
 	char buff[BIG_NUMB] = { 0 };
 	char *longStr;
@@ -511,7 +467,6 @@ TEST(string_memccpy, big)
 
 	free((void *)longStr);
 
-#endif
 }
 
 
@@ -741,15 +696,14 @@ TEST_TEAR_DOWN(string_stpncpy)
 TEST(string_stpncpy, basic)
 {
 	/* Ifdef used because lack of function 'stpncpy' */
-#ifdef __phoenix__
-	TEST_IGNORE();
-#endif
-#ifndef __phoenix__
 
 	char buff[MAX_STR_LEN] = { 0 };
 	int i;
 
-	TEST_ASSERT_EQUAL_STRING(&buff[strlen(buff)], stpncpy(buff, TEST_STR1, sizeof(buff)));
+	{
+		char *ret = stpncpy(buff, TEST_STR1, sizeof(buff));
+		TEST_ASSERT_EQUAL_STRING(&buff[strlen(buff)], ret);
+	}
 	TEST_ASSERT_EQUAL_STRING(TEST_STR1, buff);
 
 	/* Checking if we don't overwrite elements after the end of input*/
@@ -759,7 +713,10 @@ TEST(string_stpncpy, basic)
 
 	memset(buff, 0, sizeof(buff));
 
-	TEST_ASSERT_EQUAL_STRING(&buff[strlen(buff)], stpncpy(buff, TEST_STR2, sizeof(buff)));
+	{
+		char *ret = stpncpy(buff, TEST_STR2, sizeof(buff));
+		TEST_ASSERT_EQUAL_STRING(&buff[strlen(buff)], ret);
+	}
 	TEST_ASSERT_EQUAL_STRING(TEST_STR2, buff);
 
 	for (i = sizeof(TEST_STR2) - 1; i < sizeof(buff); i++) {
@@ -767,22 +724,20 @@ TEST(string_stpncpy, basic)
 	}
 
 	/* Buffer not cleared intentionally to check copy capability*/
-	TEST_ASSERT_EQUAL_STRING(&buff[strlen(buff)], stpncpy(buff, TEST_STR1, sizeof(buff)));
+	{
+		char *ret = stpncpy(buff, TEST_STR1, sizeof(buff));
+		TEST_ASSERT_EQUAL_STRING(&buff[strlen(buff)], ret);
+	}
 	TEST_ASSERT_EQUAL_STRING(TEST_STR1, buff);
 
 	for (i = sizeof(TEST_STR1) - 1; i < sizeof(buff); i++) {
 		TEST_ASSERT_EQUAL_CHAR('\0', buff[i]);
 	}
-#endif
 }
 
 
 TEST(string_stpncpy, ascii)
 {
-#ifdef __phoenix__
-	TEST_IGNORE();
-#endif
-#ifndef __phoenix__
 
 
 	char buff[CHARS_SET_SIZE] = { 0 },
@@ -796,16 +751,11 @@ TEST(string_stpncpy, ascii)
 	}
 
 	TEST_ASSERT_EQUAL_CHAR_ARRAY(buff, ascii, sizeof(buff));
-#endif
 }
 
 
 TEST(string_stpncpy, null_sens)
 {
-#ifdef __phoenix__
-	TEST_IGNORE();
-#endif
-#ifndef __phoenix__
 
 	char buff[MAX_STR_LEN] = { 0 };
 	char testStr[] = "Lorem \0 ipsum";
@@ -821,16 +771,11 @@ TEST(string_stpncpy, null_sens)
 	TEST_ASSERT_EQUAL_PTR(buff, stpncpy(buff, "", sizeof(buff)));
 	TEST_ASSERT_EQUAL_CHAR_ARRAY(buff, testStr, sizeof(testStr));
 
-#endif
 }
 
 
 TEST(string_stpncpy, adjacent)
 {
-#ifdef __phoenix__
-	TEST_IGNORE();
-#endif
-#ifndef __phoenix__
 	/* Pragma truncation disable for the different lengths of copy string tests than source */
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wstringop-truncation"
@@ -854,16 +799,11 @@ TEST(string_stpncpy, adjacent)
 	TEST_ASSERT_EQUAL_CHAR_ARRAY(memStr, expVal, sizeof(memStr));
 
 #pragma GCC diagnostic pop
-#endif
 }
 
 
 TEST(string_stpncpy, one_byte)
 {
-#ifdef __phoenix__
-	TEST_IGNORE();
-#endif
-#ifndef __phoenix__
 	/* Pragma truncation disable for the different lengths of copy string tests than source */
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wstringop-truncation"
@@ -884,16 +824,11 @@ TEST(string_stpncpy, one_byte)
 	}
 
 #pragma GCC diagnostic pop
-#endif
 }
 
 
 TEST(string_stpncpy, various_sizes)
 {
-#ifdef __phoenix__
-	TEST_IGNORE();
-#endif
-#ifndef __phoenix__
 	/* Pragma truncation disable for the different lengths of copy string tests than source */
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wstringop-truncation"
@@ -922,16 +857,11 @@ TEST(string_stpncpy, various_sizes)
 	TEST_ASSERT_EQUAL_STRING(testArray, smallInput);
 
 #pragma GCC diagnostic pop
-#endif
 }
 
 
 TEST(string_stpncpy, big)
 {
-#ifdef __phoenix__
-	TEST_IGNORE();
-#endif
-#ifndef __phoenix__
 
 	char bigBuff[BIG_NUMB] = { 0 };
 	char *longStr;
@@ -946,16 +876,11 @@ TEST(string_stpncpy, big)
 
 	free((void *)longStr);
 
-#endif
 }
 
 
 TEST(string_stpncpy, append_null)
 {
-#ifdef __phoenix__
-	TEST_IGNORE();
-#endif
-#ifndef __phoenix__
 
 	char buff[BIG_NUMB] = { 0 },
 		 input[BIG_NUMB / 2] = { 0 };
@@ -979,7 +904,10 @@ TEST(string_stpncpy, append_null)
 	/* To check append ability we need to set up values in the buff to other than 0 */
 	memset(buff, 1, sizeof(buff));
 
-	TEST_ASSERT_EQUAL_PTR(&buff[strlen(buff)], stpncpy(buff, input, sizeof(buff)));
+	{
+		char *ret = stpncpy(buff, input, sizeof(buff));
+		TEST_ASSERT_EQUAL_PTR(&buff[strlen(buff)], ret);
+	}
 	TEST_ASSERT_EQUAL_CHAR_ARRAY(buff, input, sizeof(input) - 1);
 
 	for (i = BIG_NUMB / 2 - 1; i < BIG_NUMB; i++) {
@@ -987,7 +915,6 @@ TEST(string_stpncpy, append_null)
 	}
 
 	free((void *)testStr);
-#endif
 }
 
 

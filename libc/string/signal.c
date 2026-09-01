@@ -61,9 +61,6 @@ TEST_TEAR_DOWN(signal_psignal)
 TEST(signal_psignal, basic)
 {
 /* Disabled because of #695 issue: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/695 */
-#ifdef __phoenix__
-	TEST_IGNORE_MESSAGE("#695 issue");
-#else
 	/* Since these function shall not return a value, we check only errno */
 	char buff[MAX_LEN_STRING];
 
@@ -86,16 +83,12 @@ TEST(signal_psignal, basic)
 		fflush(err_file);
 		close(fd);
 	}
-#endif
 }
 
 
 TEST(signal_psignal, ascii_string)
 {
 /* Disabled because of #695 issue: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/695 */
-#ifdef __phoenix__
-	TEST_IGNORE_MESSAGE("#695 issue");
-#else
 	char buff[MAX_LEN_STRING];
 
 	char ascii_str[MAX_LEN_STRING] = { 0 };
@@ -127,16 +120,12 @@ TEST(signal_psignal, ascii_string)
 		fflush(err_file);
 		close(fd);
 	}
-#endif
 }
 
 
 TEST(signal_psignal, psignal_strsignal)
 {
 /* Disabled because of #695 issue: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/695 */
-#ifdef __phoenix__
-	TEST_IGNORE_MESSAGE("#695 issue");
-#else
 	char buff[MAX_LEN_STRING];
 
 	for (int i = 0; i < signal_codes_len; i++) {
@@ -160,16 +149,12 @@ TEST(signal_psignal, psignal_strsignal)
 		fflush(err_file);
 		close(fd);
 	}
-#endif
 }
 
 
 TEST(signal_psignal, psignal_strsignal_null)
 {
 /* Disabled because of #695 issue: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/695 */
-#ifdef __phoenix__
-	TEST_IGNORE_MESSAGE("#695 issue");
-#else
 	char buff[MAX_LEN_STRING];
 
 	for (int i = 0; i < signal_codes_len; i++) {
@@ -192,7 +177,6 @@ TEST(signal_psignal, psignal_strsignal_null)
 		fflush(err_file);
 		close(fd);
 	}
-#endif
 }
 
 
