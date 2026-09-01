@@ -453,10 +453,60 @@ TEST(test_pthread_detach, detach_null_handle)
 }
 
 
+static void *test_detach_touch(void *arg)
+{
+	/* Touch most of the stack so a leaked (unreclaimed) stack holds physical RAM,
+	 * not just address space. 64 KiB fits well inside the 256 KiB churn stack. */
+	volatile char buf[64 * 1024];
+	size_t i;
+	(void)arg;
+	for (i = 0; i < sizeof(buf); i += 4096) {
+		buf[i] = (char)i;
+	}
+	return NULL;
+}
+
+
+TEST(test_pthread_detach, detached_burst_stack_reclaim)
+{
+	/* Regression: a detached thread with a libphoenix-mmap'd stack crashed on
+	 * EXIT under bursty exits -- the old deferred cross-thread stack free munmap'd
+	 * a still-live stack (Data Abort EL0 in the munmap epilogue, far==sp) on SMP.
+	 * (a) bursts of concurrent detached exits reproduce the crash; (b) sustained
+	 * one-at-a-time churn with a touched stack verifies the stacks are reclaimed
+	 * (not leaked) -- a leak would exhaust address space/RAM and fail create. */
+	pthread_attr_t attr;
+	int round, i;
+
+	for (round = 0; round < 4; round++) {
+		for (i = 0; i < 8; i++) {
+			pthread_t t;
+			TEST_ASSERT_EQUAL(0, pthread_attr_init(&attr));
+			TEST_ASSERT_EQUAL(0, pthread_attr_setstacksize(&attr, 64 * 1024));
+			TEST_ASSERT_EQUAL(0, pthread_create(&t, &attr, test_detach_worker, NULL));
+			TEST_ASSERT_EQUAL(0, pthread_attr_destroy(&attr));
+			TEST_ASSERT_EQUAL(0, pthread_detach(t));
+		}
+		usleep(30000);
+	}
+
+	for (i = 0; i < 200; i++) {
+		pthread_t t;
+		TEST_ASSERT_EQUAL(0, pthread_attr_init(&attr));
+		TEST_ASSERT_EQUAL(0, pthread_attr_setstacksize(&attr, 256 * 1024));
+		TEST_ASSERT_EQUAL(0, pthread_create(&t, &attr, test_detach_touch, NULL));
+		TEST_ASSERT_EQUAL(0, pthread_attr_destroy(&attr));
+		TEST_ASSERT_EQUAL(0, pthread_detach(t));
+		usleep(2000);
+	}
+}
+
+
 TEST_GROUP_RUNNER(test_pthread_detach)
 {
 	RUN_TEST_CASE(test_pthread_detach, detach_stale_handle_no_uaf);
 	RUN_TEST_CASE(test_pthread_detach, detach_null_handle);
+	RUN_TEST_CASE(test_pthread_detach, detached_burst_stack_reclaim);
 }
 
 
