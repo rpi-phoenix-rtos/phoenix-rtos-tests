@@ -286,6 +286,74 @@ IGNORE_TEST(unistd_fsdir, fchown)
 }
 
 
+/* The *at() family: dirfd-relative resolution (via the kernel fd->path record)
+ * plus the AT_FDCWD and absolute-path fast paths, and the AT_REMOVEDIR/
+ * AT_SYMLINK_NOFOLLOW flags. CWD == testWorkDir during the test (TEST_SETUP). */
+TEST(unistd_fsdir, at_family)
+{
+	struct stat st;
+	int dfd, ffd, wfd;
+	ssize_t n;
+	char lbuf[64];
+
+	/* AT_FDCWD behaves exactly like the plain call. */
+	ffd = openat(AT_FDCWD, FNAME, O_RDONLY); /* FNAME created in TEST_SETUP */
+	TEST_ASSERT_TRUE(ffd >= 0);
+	close(ffd);
+
+	/* A real directory fd: names resolve relative to it. */
+	dfd = open(".", O_RDONLY);
+	TEST_ASSERT_TRUE(dfd >= 0);
+
+	ffd = openat(dfd, FNAME, O_RDONLY);
+	TEST_ASSERT_TRUE(ffd >= 0);
+	close(ffd);
+
+	/* create + stat a file via the dir fd */
+	wfd = openat(dfd, "at_f", O_CREAT | O_WRONLY, 0644);
+	TEST_ASSERT_TRUE(wfd >= 0);
+	TEST_ASSERT_EQUAL_INT(3, write(wfd, "abc", 3));
+	close(wfd);
+	TEST_ASSERT_EQUAL_INT(0, fstatat(dfd, "at_f", &st, 0));
+	TEST_ASSERT_TRUE(S_ISREG(st.st_mode));
+	TEST_ASSERT_EQUAL_INT(3, (int)st.st_size);
+	TEST_ASSERT_EQUAL_INT(0, faccessat(dfd, "at_f", F_OK, 0));
+
+	/* mkdirat + fstatat on the new directory */
+	TEST_ASSERT_EQUAL_INT(0, mkdirat(dfd, "at_sub", 0755));
+	TEST_ASSERT_EQUAL_INT(0, fstatat(dfd, "at_sub", &st, 0));
+	TEST_ASSERT_TRUE(S_ISDIR(st.st_mode));
+
+	/* renameat within the dir fd */
+	TEST_ASSERT_EQUAL_INT(0, renameat(dfd, "at_f", dfd, "at_f2"));
+	TEST_ASSERT_EQUAL_INT(-1, fstatat(dfd, "at_f", &st, 0)); /* old gone */
+	TEST_ASSERT_EQUAL_INT(0, fstatat(dfd, "at_f2", &st, 0)); /* new present */
+
+	/* symlinkat + readlinkat + AT_SYMLINK_NOFOLLOW */
+	if (symlinkat("at_f2", dfd, "at_ln") == 0) {
+		n = readlinkat(dfd, "at_ln", lbuf, sizeof(lbuf) - 1);
+		TEST_ASSERT_TRUE(n > 0);
+		lbuf[n] = '\0';
+		TEST_ASSERT_EQUAL_STRING("at_f2", lbuf);
+		TEST_ASSERT_EQUAL_INT(0, fstatat(dfd, "at_ln", &st, AT_SYMLINK_NOFOLLOW));
+		TEST_ASSERT_TRUE(S_ISLNK(st.st_mode));
+		TEST_ASSERT_EQUAL_INT(0, unlinkat(dfd, "at_ln", 0));
+	}
+
+	/* unlinkat routing: plain flag -> unlink(), AT_REMOVEDIR -> rmdir(). NOTE: we do
+	 * NOT assert that unlinkat(dir, 0) fails -- on Phoenix unlink() does not reject a
+	 * directory (fs-level unlink and rmdir share mtUnlink), a separate conformance
+	 * gap. Here we exercise the flag that matters for the *at layer. */
+	TEST_ASSERT_EQUAL_INT(0, unlinkat(dfd, "at_f2", 0));
+	TEST_ASSERT_EQUAL_INT(0, unlinkat(dfd, "at_sub", AT_REMOVEDIR));
+
+	/* a bad dir fd must fail, not act on the cwd */
+	TEST_ASSERT_EQUAL_INT(-1, openat(-1, "at_nope", O_RDONLY));
+
+	close(dfd);
+}
+
+
 TEST_GROUP_RUNNER(unistd_fsdir)
 {
 	RUN_TEST_CASE(unistd_fsdir, getcwd);
@@ -307,4 +375,5 @@ TEST_GROUP_RUNNER(unistd_fsdir)
 
 	RUN_TEST_CASE(unistd_fsdir, fchdir);
 	RUN_TEST_CASE(unistd_fsdir, fchown);
+	RUN_TEST_CASE(unistd_fsdir, at_family);
 }
