@@ -79,10 +79,6 @@ TEST(time_strftime, basic_formatting)
 
 TEST(time_strftime, additional_format_chars)
 {
-/* Disabled because of #351 issue: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/351 (point 1) */
-#ifdef __phoenix__
-	TEST_IGNORE_MESSAGE("#351 issue");
-#endif
 	for (int i = 0; i < SIZE_OF_TABLE(additional_format_chars); i++) {
 		strftime_assert(&additional_format_chars[i]);
 	}
