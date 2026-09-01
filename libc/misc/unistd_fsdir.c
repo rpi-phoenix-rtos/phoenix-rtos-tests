@@ -340,17 +340,49 @@ TEST(unistd_fsdir, at_family)
 		TEST_ASSERT_EQUAL_INT(0, unlinkat(dfd, "at_ln", 0));
 	}
 
-	/* unlinkat routing: plain flag -> unlink(), AT_REMOVEDIR -> rmdir(). NOTE: we do
-	 * NOT assert that unlinkat(dir, 0) fails -- on Phoenix unlink() does not reject a
-	 * directory (fs-level unlink and rmdir share mtUnlink), a separate conformance
-	 * gap. Here we exercise the flag that matters for the *at layer. */
+	/* unlinkat routing: plain flag -> unlink() (which rejects a directory, EISDIR),
+	 * AT_REMOVEDIR -> rmdir(). */
 	TEST_ASSERT_EQUAL_INT(0, unlinkat(dfd, "at_f2", 0));
+	TEST_ASSERT_EQUAL_INT(-1, unlinkat(dfd, "at_sub", 0)); /* a directory needs AT_REMOVEDIR */
 	TEST_ASSERT_EQUAL_INT(0, unlinkat(dfd, "at_sub", AT_REMOVEDIR));
 
 	/* a bad dir fd must fail, not act on the cwd */
 	TEST_ASSERT_EQUAL_INT(-1, openat(-1, "at_nope", O_RDONLY));
 
 	close(dfd);
+}
+
+
+/* POSIX conformance: unlink() must reject a directory (EISDIR); remove() routes a
+ * directory to rmdir(); a symlink-to-directory is unlinked as the symlink. */
+TEST(unistd_fsdir, unlink_rejects_dir)
+{
+	struct stat st;
+	int fd;
+
+	TEST_ASSERT_EQUAL_INT(0, mkdir("ud_dir", 0755));
+	errno = 0;
+	TEST_ASSERT_EQUAL_INT(-1, unlink("ud_dir"));
+	TEST_ASSERT_EQUAL_INT(EISDIR, errno);
+	TEST_ASSERT_EQUAL_INT(0, stat("ud_dir", &st)); /* not removed */
+
+	/* remove() on a directory routes to rmdir() */
+	TEST_ASSERT_EQUAL_INT(0, remove("ud_dir"));
+	TEST_ASSERT_EQUAL_INT(-1, stat("ud_dir", &st)); /* gone */
+
+	/* a regular file: unlink() still works */
+	fd = open("ud_file", O_CREAT | O_WRONLY, 0644);
+	TEST_ASSERT_TRUE(fd >= 0);
+	close(fd);
+	TEST_ASSERT_EQUAL_INT(0, unlink("ud_file"));
+
+	/* a symlink to a directory: unlink() removes the symlink, not the target */
+	TEST_ASSERT_EQUAL_INT(0, mkdir("ud_target", 0755));
+	if (symlink("ud_target", "ud_lnk") == 0) {
+		TEST_ASSERT_EQUAL_INT(0, unlink("ud_lnk"));        /* symlink removed */
+		TEST_ASSERT_EQUAL_INT(0, stat("ud_target", &st));  /* target survives */
+	}
+	TEST_ASSERT_EQUAL_INT(0, rmdir("ud_target"));
 }
 
 
@@ -376,4 +408,5 @@ TEST_GROUP_RUNNER(unistd_fsdir)
 	RUN_TEST_CASE(unistd_fsdir, fchdir);
 	RUN_TEST_CASE(unistd_fsdir, fchown);
 	RUN_TEST_CASE(unistd_fsdir, at_family);
+	RUN_TEST_CASE(unistd_fsdir, unlink_rejects_dir);
 }
