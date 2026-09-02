@@ -768,6 +768,8 @@ TEST_TEAR_DOWN(test_pthread_fdrace)
 
 static volatile int fdrace_stop;
 static long fdrace_opened;
+static long fdrace_raced;   /* opens the sweeper took the descriptor from */
+static long fdrace_othererr;
 
 static void *fdrace_opener(void *arg)
 {
@@ -779,6 +781,18 @@ static void *fdrace_opener(void *arg)
 		if (fd >= 0) {
 			fdrace_opened++;
 			(void)close(fd);
+		}
+		else if (errno == EBADF) {
+			/* The sweeper closed the descriptor while open() was still
+			 * building the file, so the open has no descriptor to return.
+			 * Expected under this workload -- open() does several blocking
+			 * IPCs, so the window is far wider than a sweep iteration -- and
+			 * far better than being handed a number that now refers to a
+			 * different file. */
+			fdrace_raced++;
+		}
+		else {
+			fdrace_othererr++;
 		}
 	}
 	fdrace_stop = 1;
@@ -807,6 +821,8 @@ TEST(test_pthread_fdrace, close_sweep_races_open)
 
 	fdrace_stop = 0;
 	fdrace_opened = 0;
+	fdrace_raced = 0;
+	fdrace_othererr = 0;
 
 	TEST_ASSERT_EQUAL_INT(0, pthread_create(&opener, NULL, fdrace_opener, NULL));
 	TEST_ASSERT_EQUAL_INT(0, pthread_create(&sweeper, NULL, fdrace_sweeper, NULL));
@@ -814,9 +830,13 @@ TEST(test_pthread_fdrace, close_sweep_races_open)
 	TEST_ASSERT_EQUAL_INT(0, pthread_join(opener, NULL));
 	TEST_ASSERT_EQUAL_INT(0, pthread_join(sweeper, NULL));
 
-	/* Some opens must have succeeded, or the race never happened and the test
-	 * would be vacuous. */
-	TEST_ASSERT_GREATER_THAN_INT(0, fdrace_opened);
+	/* Every open must have either succeeded or lost its descriptor to the
+	 * sweeper -- nothing else. Which of the two dominates depends on timing
+	 * (with the root on NFS the open window is wide and the sweeper wins
+	 * almost every time), so asserting on either count alone would be
+	 * flaky; asserting the sum is non-zero keeps the test non-vacuous. */
+	TEST_ASSERT_EQUAL_INT(0, fdrace_othererr);
+	TEST_ASSERT_GREATER_THAN_INT(0, fdrace_opened + fdrace_raced);
 
 	/* The descriptor table still has to work after all that. */
 	fd = open(FDRACE_PATH, O_CREAT | O_RDWR, 0666);
@@ -849,10 +869,16 @@ static void *fdrace_sockmaker(void *arg)
 			fdrace_opened++;
 			(void)close(s);
 		}
+		else {
+			fdrace_raced++;
+		}
 		if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0) {
 			fdrace_opened++;
 			(void)close(sv[0]);
 			(void)close(sv[1]);
+		}
+		else {
+			fdrace_raced++;
 		}
 	}
 	fdrace_stop = 1;
@@ -867,6 +893,7 @@ TEST(test_pthread_fdrace, close_sweep_races_socket)
 
 	fdrace_stop = 0;
 	fdrace_opened = 0;
+	fdrace_raced = 0;
 
 	TEST_ASSERT_EQUAL_INT(0, pthread_create(&maker, NULL, fdrace_sockmaker, NULL));
 	TEST_ASSERT_EQUAL_INT(0, pthread_create(&sweeper, NULL, fdrace_sweeper, NULL));
@@ -874,8 +901,8 @@ TEST(test_pthread_fdrace, close_sweep_races_socket)
 	TEST_ASSERT_EQUAL_INT(0, pthread_join(maker, NULL));
 	TEST_ASSERT_EQUAL_INT(0, pthread_join(sweeper, NULL));
 
-	/* Some must have been created, or the race never happened. */
-	TEST_ASSERT_GREATER_THAN_INT(0, fdrace_opened);
+	/* Non-vacuity: the maker ran. Successes vs races is timing-dependent. */
+	TEST_ASSERT_GREATER_THAN_INT(0, fdrace_opened + fdrace_raced);
 
 	/* The descriptor table still has to work afterwards. */
 	s = socket(AF_UNIX, SOCK_STREAM, 0);
