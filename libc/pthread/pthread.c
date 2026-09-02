@@ -19,6 +19,8 @@
 #include <errno.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <time.h>
 
 #include "unity_fixture.h"
@@ -823,7 +825,67 @@ TEST(test_pthread_fdrace, close_sweep_races_open)
 }
 
 
+/* The same window through posix_newFile instead of posix_open.
+ *
+ * socket()/socketpair() also have to publish the fd slot before filling the
+ * file in, and accept() blocks inside that window waiting for a connection. A
+ * racing close used to take the file's last reference and free it while the
+ * constructor was still writing to it, with the error path freeing it a second
+ * time -- one block on the kernel's zone free list twice. Measured on a Pi4,
+ * the slot really is stolen mid-construction under this workload.
+ *
+ * Like close_sweep_races_open, this asserts that both threads finish and the
+ * descriptor table still works; a regression shows up as a fault or a hang.
+ */
+static void *fdrace_sockmaker(void *arg)
+{
+	long i;
+
+	(void)arg;
+	for (i = 0; i < FDRACE_ROUNDS; ++i) {
+		int sv[2];
+		int s = socket(AF_UNIX, SOCK_STREAM, 0);
+		if (s >= 0) {
+			fdrace_opened++;
+			(void)close(s);
+		}
+		if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0) {
+			fdrace_opened++;
+			(void)close(sv[0]);
+			(void)close(sv[1]);
+		}
+	}
+	fdrace_stop = 1;
+	return NULL;
+}
+
+
+TEST(test_pthread_fdrace, close_sweep_races_socket)
+{
+	pthread_t maker, sweeper;
+	int s;
+
+	fdrace_stop = 0;
+	fdrace_opened = 0;
+
+	TEST_ASSERT_EQUAL_INT(0, pthread_create(&maker, NULL, fdrace_sockmaker, NULL));
+	TEST_ASSERT_EQUAL_INT(0, pthread_create(&sweeper, NULL, fdrace_sweeper, NULL));
+
+	TEST_ASSERT_EQUAL_INT(0, pthread_join(maker, NULL));
+	TEST_ASSERT_EQUAL_INT(0, pthread_join(sweeper, NULL));
+
+	/* Some must have been created, or the race never happened. */
+	TEST_ASSERT_GREATER_THAN_INT(0, fdrace_opened);
+
+	/* The descriptor table still has to work afterwards. */
+	s = socket(AF_UNIX, SOCK_STREAM, 0);
+	TEST_ASSERT_GREATER_OR_EQUAL_INT(0, s);
+	TEST_ASSERT_EQUAL_INT(0, close(s));
+}
+
+
 TEST_GROUP_RUNNER(test_pthread_fdrace)
 {
 	RUN_TEST_CASE(test_pthread_fdrace, close_sweep_races_open);
+	RUN_TEST_CASE(test_pthread_fdrace, close_sweep_races_socket);
 }
