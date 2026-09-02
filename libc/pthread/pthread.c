@@ -745,6 +745,10 @@ TEST_GROUP_RUNNER(test_pthread_newlocks)
  * completion with the descriptor table still coherent afterwards. A regression
  * shows up as a fault, a hang, or a descriptor table that no longer works.
  */
+#define FDRACE_PATH   "pthread_fdrace.txt"
+#define FDRACE_ROUNDS 2000
+#define FDRACE_MAXFD  32
+
 TEST_GROUP(test_pthread_fdrace);
 
 TEST_SETUP(test_pthread_fdrace)
@@ -753,11 +757,12 @@ TEST_SETUP(test_pthread_fdrace)
 
 TEST_TEAR_DOWN(test_pthread_fdrace)
 {
+	/* Here rather than at the end of the test body: a failing assertion leaves
+	 * the body early, and a leftover file in the (NFS) root changes which
+	 * branch a later create takes -- a footgun that has cost this project time
+	 * before. */
+	(void)unlink(FDRACE_PATH);
 }
-
-#define FDRACE_PATH   "pthread_fdrace.txt"
-#define FDRACE_ROUNDS 2000
-#define FDRACE_MAXFD  32
 
 static volatile int fdrace_stop;
 static long fdrace_opened;
@@ -815,8 +820,6 @@ TEST(test_pthread_fdrace, close_sweep_races_open)
 	fd = open(FDRACE_PATH, O_CREAT | O_RDWR, 0666);
 	TEST_ASSERT_GREATER_OR_EQUAL_INT(0, fd);
 	TEST_ASSERT_EQUAL_INT(0, close(fd));
-
-	(void)unlink(FDRACE_PATH);
 }
 
 
