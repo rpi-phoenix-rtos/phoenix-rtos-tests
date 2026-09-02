@@ -1309,8 +1309,12 @@ void runner(void)
 
 	ops.ctx = NULL; /* Empty device driver context */
 
+	/* If the source file cannot be generated the tests cannot run, and that is
+	 * a failure, not something to skip past: the groups below used to be
+	 * guarded by `if (ret > -1)` with no else, so a suite that ran NOTHING
+	 * still printed "0 Tests 0 Failures ... OK". */
 	ret = test_genCharFile();
-	/* FIXME: workaround, test should fail */
+	TEST_ASSERT_EQUAL_INT_MESSAGE(0, ret, "failed to generate /var/libcache_test_char.txt");
 	if (ret > -1) {
 		srcMem = open("/var/libcache_test_char.txt", O_RDWR);
 		TEST_ASSERT_GREATER_THAN_INT(-1, srcMem);
@@ -1329,7 +1333,7 @@ void runner(void)
 	}
 
 	ret = test_genIntFile();
-	/* FIXME: workaround, test should fail */
+	TEST_ASSERT_EQUAL_INT_MESSAGE(0, ret, "failed to generate /var/libcache_test_int.txt");
 	if (ret > -1) {
 		srcMem = open("/var/libcache_test_int.txt", O_RDWR);
 		TEST_ASSERT_GREATER_THAN_INT(-1, srcMem);
