@@ -1901,6 +1901,122 @@ TEST(test_unix_socket, send_clear_peer_closed)
 }
 
 
+/* A bound socket's NAME outlives the socket: POSIX removes it on unlink(), not
+ * on close(). So after a bound socket is closed without unlinking, its path is
+ * still there -- and connecting or sending to it must fail, never reach some
+ * OTHER socket.
+ *
+ * It used to reach another socket. AF_UNIX ids were allocated lowest-free, so
+ * the closed socket's id was immediately handed to the next socket created,
+ * and the stale name -- which stores {US_PORT, id} -- then resolved straight
+ * to that new, unrelated socket. A datagram sent to the dead name landed in
+ * the live socket's buffer, so its reader returned a whole chunk nobody had
+ * sent it. These two tests pin the behaviour down from both ends: the send
+ * must fail, AND the innocent socket must receive nothing.
+ */
+#define STALE_CHURN_CNT 8
+
+TEST(test_unix_socket, stale_name_dgram_no_crosstalk)
+{
+	const char *staleName = "/tmp/test_stale_dgram";
+	const char *victimName = "/tmp/test_stale_victim";
+	int stale, victim, sender, churn[STALE_CHURN_CNT];
+	struct sockaddr_un addr = { 0 };
+	char buf[32];
+	ssize_t n;
+	int i;
+
+	stale = unix_named_socket(SOCK_DGRAM, staleName);
+	TEST_ASSERT_GREATER_OR_EQUAL_INT(0, stale);
+
+	/* Closed, deliberately NOT unlinked: the path stays behind. */
+	TEST_ASSERT_EQUAL_INT(0, close(stale));
+
+	/* Churn ids so a lowest-free allocator hands the dead socket's id out
+	 * again; a monotonic one never does. */
+	for (i = 0; i < STALE_CHURN_CNT; i++) {
+		churn[i] = socket(AF_UNIX, SOCK_DGRAM, 0);
+		TEST_ASSERT_GREATER_OR_EQUAL_INT(0, churn[i]);
+	}
+	for (i = 0; i < STALE_CHURN_CNT; i++) {
+		TEST_ASSERT_EQUAL_INT(0, close(churn[i]));
+	}
+
+	/* The innocent bystander -- the socket most likely to inherit the id. */
+	victim = unix_named_socket(SOCK_DGRAM, victimName);
+	TEST_ASSERT_GREATER_OR_EQUAL_INT(0, victim);
+
+	sender = socket(AF_UNIX, SOCK_DGRAM, 0);
+	TEST_ASSERT_GREATER_OR_EQUAL_INT(0, sender);
+
+	addr.sun_family = AF_UNIX;
+	strcpy(addr.sun_path, staleName);
+
+	errno = 0;
+	n = sendto(sender, "STALE", 5, 0, (struct sockaddr *)&addr, SUN_LEN(&addr));
+	TEST_ASSERT_EQUAL_INT(-1, n);
+	TEST_ASSERT_TRUE((errno == ECONNREFUSED) || (errno == ENOENT));
+
+	/* The part that actually catches cross-talk: even if the send had
+	 * reported failure, nothing may have been delivered elsewhere. */
+	errno = 0;
+	n = recv(victim, buf, sizeof(buf), MSG_DONTWAIT);
+	TEST_ASSERT_EQUAL_INT(-1, n);
+	TEST_ASSERT_TRUE((errno == EAGAIN) || (errno == EWOULDBLOCK));
+
+	close(sender);
+	close(victim);
+	unlink(staleName);
+	unlink(victimName);
+}
+
+
+TEST(test_unix_socket, stale_name_stream_no_crosstalk)
+{
+	const char *staleName = "/tmp/test_stale_stream";
+	const char *victimName = "/tmp/test_stale_listener";
+	int stale, victim, client, churn[STALE_CHURN_CNT];
+	int err, i;
+
+	stale = unix_named_socket(SOCK_STREAM, staleName);
+	TEST_ASSERT_GREATER_OR_EQUAL_INT(0, stale);
+	TEST_ASSERT_EQUAL_INT(0, listen(stale, 4));
+	TEST_ASSERT_EQUAL_INT(0, close(stale));
+
+	for (i = 0; i < STALE_CHURN_CNT; i++) {
+		churn[i] = socket(AF_UNIX, SOCK_STREAM, 0);
+		TEST_ASSERT_GREATER_OR_EQUAL_INT(0, churn[i]);
+	}
+	for (i = 0; i < STALE_CHURN_CNT; i++) {
+		TEST_ASSERT_EQUAL_INT(0, close(churn[i]));
+	}
+
+	victim = unix_named_socket(SOCK_STREAM, victimName);
+	TEST_ASSERT_GREATER_OR_EQUAL_INT(0, victim);
+	TEST_ASSERT_EQUAL_INT(0, listen(victim, 4));
+	TEST_ASSERT_EQUAL_INT(0, fcntl(victim, F_SETFL, O_NONBLOCK));
+
+	client = socket(AF_UNIX, SOCK_STREAM, 0);
+	TEST_ASSERT_GREATER_OR_EQUAL_INT(0, client);
+
+	errno = 0;
+	err = connect_to_named(client, staleName);
+	TEST_ASSERT_EQUAL_INT(-1, err);
+	TEST_ASSERT_TRUE((errno == ECONNREFUSED) || (errno == ENOENT));
+
+	/* Nobody may have been connected to instead. */
+	errno = 0;
+	err = accept(victim, NULL, NULL);
+	TEST_ASSERT_EQUAL_INT(-1, err);
+	TEST_ASSERT_TRUE((errno == EAGAIN) || (errno == EWOULDBLOCK));
+
+	close(client);
+	close(victim);
+	unlink(staleName);
+	unlink(victimName);
+}
+
+
 TEST_GROUP_RUNNER(test_unix_socket)
 {
 	RUN_TEST_CASE(test_unix_socket, zero_len_send);
@@ -1928,6 +2044,8 @@ TEST_GROUP_RUNNER(test_unix_socket)
 	RUN_TEST_CASE(test_unix_socket, wrong_port);
 	RUN_TEST_CASE(test_unix_socket, wrong_type);
 	RUN_TEST_CASE(test_unix_socket, send_clear_peer_closed);
+	RUN_TEST_CASE(test_unix_socket, stale_name_dgram_no_crosstalk);
+	RUN_TEST_CASE(test_unix_socket, stale_name_stream_no_crosstalk);
 }
 
 void runner(void)
