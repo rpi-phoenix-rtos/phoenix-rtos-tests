@@ -18,6 +18,7 @@
 #include <sys/types.h>
 #include <errno.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <time.h>
 
 #include "unity_fixture.h"
@@ -722,4 +723,104 @@ TEST_GROUP_RUNNER(test_pthread_newlocks)
 	RUN_TEST_CASE(test_pthread_newlocks, mutex_errorcheck_relock_edeadlk);
 	RUN_TEST_CASE(test_pthread_newlocks, mutexattr_roundtrip);
 	RUN_TEST_CASE(test_pthread_newlocks, mutex_robust_owner_death);
+}
+
+
+/* An fd sweep racing an open().
+ *
+ * posix_open has to publish p->fds[fd].file BEFORE the file is filled in,
+ * because the slot is how the descriptor is reserved across the blocking IPCs
+ * the open performs. A half-built open_file_t is therefore reachable from every
+ * other thread of the process, and any thread that walks the fd space closing
+ * descriptors -- a close-all sweep like the one below, or the exit-time sweep --
+ * will find it. That close used to decrement an uninitialised refs: measured on
+ * a Pi4, 869 of 869 raced closes read refs == 0, each one clearing the slot and
+ * leaking the file, and had the recycled value been 1 it would have freed the
+ * file while open() was still writing into it.
+ *
+ * The kernel now takes a construction reference for the duration of the open,
+ * so the racing close can drop the slot's reference without ever reaching zero.
+ *
+ * This cannot assert on the race itself; it asserts that the two threads run to
+ * completion with the descriptor table still coherent afterwards. A regression
+ * shows up as a fault, a hang, or a descriptor table that no longer works.
+ */
+TEST_GROUP(test_pthread_fdrace);
+
+TEST_SETUP(test_pthread_fdrace)
+{
+}
+
+TEST_TEAR_DOWN(test_pthread_fdrace)
+{
+}
+
+#define FDRACE_PATH   "pthread_fdrace.txt"
+#define FDRACE_ROUNDS 2000
+#define FDRACE_MAXFD  32
+
+static volatile int fdrace_stop;
+static long fdrace_opened;
+
+static void *fdrace_opener(void *arg)
+{
+	long i;
+
+	(void)arg;
+	for (i = 0; i < FDRACE_ROUNDS; ++i) {
+		int fd = open(FDRACE_PATH, O_CREAT | O_RDWR, 0666);
+		if (fd >= 0) {
+			fdrace_opened++;
+			(void)close(fd);
+		}
+	}
+	fdrace_stop = 1;
+	return NULL;
+}
+
+
+static void *fdrace_sweeper(void *arg)
+{
+	(void)arg;
+	while (fdrace_stop == 0) {
+		int fd;
+		/* from 3, so the harness keeps stdin/stdout/stderr */
+		for (fd = 3; fd < FDRACE_MAXFD; ++fd) {
+			(void)close(fd);
+		}
+	}
+	return NULL;
+}
+
+
+TEST(test_pthread_fdrace, close_sweep_races_open)
+{
+	pthread_t opener, sweeper;
+	int fd;
+
+	fdrace_stop = 0;
+	fdrace_opened = 0;
+
+	TEST_ASSERT_EQUAL_INT(0, pthread_create(&opener, NULL, fdrace_opener, NULL));
+	TEST_ASSERT_EQUAL_INT(0, pthread_create(&sweeper, NULL, fdrace_sweeper, NULL));
+
+	TEST_ASSERT_EQUAL_INT(0, pthread_join(opener, NULL));
+	TEST_ASSERT_EQUAL_INT(0, pthread_join(sweeper, NULL));
+
+	/* Some opens must have succeeded, or the race never happened and the test
+	 * would be vacuous. */
+	TEST_ASSERT_GREATER_THAN_INT(0, fdrace_opened);
+
+	/* The descriptor table still has to work after all that. */
+	fd = open(FDRACE_PATH, O_CREAT | O_RDWR, 0666);
+	TEST_ASSERT_GREATER_OR_EQUAL_INT(0, fd);
+	TEST_ASSERT_EQUAL_INT(0, close(fd));
+
+	(void)unlink(FDRACE_PATH);
+}
+
+
+TEST_GROUP_RUNNER(test_pthread_fdrace)
+{
+	RUN_TEST_CASE(test_pthread_fdrace, close_sweep_races_open);
 }
