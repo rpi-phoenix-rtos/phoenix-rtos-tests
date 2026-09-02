@@ -166,11 +166,58 @@ static pid_t safe_fork(void)
 }
 
 
+/* The children in this suite die with a Data Abort at libphoenix's
+ * fwrite() -> mutexLock(stream->lock), far=0x30, because a stdio FILE* global
+ * is NULL. stdin/stdout/stderr are heap pointers stored in .data
+ * (libphoenix stdio/file.c:57, allocated once in _file_init), so NULL means
+ * the GLOBAL was zeroed after startup.
+ *
+ * These checks name the operation that zeroes it. They report with a raw
+ * write(2) and _exit(): stdio is the casualty, so any fprintf here would fault
+ * before the message reached the log -- which is exactly how this hid for so
+ * long (a child that crashes while reporting looks like a silent crash).
+ */
+static FILE *stdio_snap[3];
+
+static void stdio_snapshot(void)
+{
+	stdio_snap[0] = stdin;
+	stdio_snap[1] = stdout;
+	stdio_snap[2] = stderr;
+}
+
+
+static void stdio_verify(const char *where)
+{
+	static const char *const names[3] = { "stdin", "stdout", "stderr" };
+	FILE *now[3];
+	char msg[192];
+	int i, n;
+
+	now[0] = stdin;
+	now[1] = stdout;
+	now[2] = stderr;
+
+	for (i = 0; i < 3; i++) {
+		if (now[i] == stdio_snap[i]) {
+			continue;
+		}
+		n = snprintf(msg, sizeof(msg), "STDIO-CLOBBER at %s: %s was %p now %p\n",
+			where, names[i], (void *)stdio_snap[i], (void *)now[i]);
+		if (n > 0) {
+			(void)write(2, msg, (size_t)n);
+		}
+		_exit(97);
+	}
+}
+
+
 TEST_GROUP(test_unix_socket);
 
 
 TEST_SETUP(test_unix_socket)
 {
+	stdio_snapshot();
 	size_t i;
 
 	srandom(time(NULL));
@@ -858,6 +905,7 @@ static int unix_data_cmp(char *buf, size_t pos, size_t len)
 }
 
 
+
 static void unix_transfer(int type)
 {
 	int fd[2];
@@ -889,6 +937,8 @@ static void unix_transfer(int type)
 			}
 		}
 
+		stdio_verify("parent-after-send");
+
 		if (waitpid(pid, &status, 0) < 0)
 			FAIL("waitpid");
 
@@ -902,8 +952,11 @@ static void unix_transfer(int type)
 		size_t pos = 0;
 		ssize_t n;
 
+		stdio_verify("child-start");
+
 		while (tot_len > 0) {
 			n = recv(fd[1], buf, sizeof(buf), 0);
+			stdio_verify("child-after-recv");
 			CHILD_ASSERT(n > 0 || errno == EAGAIN);
 			if (n > 0) {
 				CHILD_ASSERT(unix_data_cmp(buf, pos, n) == 0);
@@ -912,6 +965,7 @@ static void unix_transfer(int type)
 			}
 		}
 
+		stdio_verify("child-before-exit");
 		exit(0);
 	}
 }
