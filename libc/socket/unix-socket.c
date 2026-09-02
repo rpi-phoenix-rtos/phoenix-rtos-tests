@@ -161,6 +161,15 @@ TEST_SETUP(test_unix_socket)
 
 TEST_TEAR_DOWN(test_unix_socket)
 {
+	/* Flush after every test so a run that dies or stalls still shows how far
+	 * it got. Without this, a suite whose stdout ends up fully buffered (the
+	 * console is not always a tty at the moment the shell starts it) produces
+	 * NO output at all until it exits -- which is indistinguishable, in the
+	 * log, from a binary that never ran. That ambiguity has cost real time on
+	 * the rpi4b port, where these tests are used to chase an intermittent
+	 * fault. Unity's own per-test line is what makes progress visible; this
+	 * only guarantees it reaches the console. */
+	fflush(stdout);
 }
 
 
