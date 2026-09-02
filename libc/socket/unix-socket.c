@@ -212,12 +212,80 @@ static void stdio_verify(const char *where)
 }
 
 
+/* Heap canary carried ACROSS the fork.
+ *
+ * Two distinct child crashes here have the same shape: a pointer that should
+ * be valid reads as NULL. libphoenix's stdio globals (NULL FILE* -> fwrite
+ * faults at far=0x30) and the allocator's free list (NULL link ->
+ * _malloc_chunkRemove/lib_listRemove faults at far=0x10). Both are explained
+ * by a REGION of the child's memory becoming zeros rather than by two
+ * unrelated pointer bugs -- and the obvious way for that to happen is a COW
+ * fault that installs a fresh zero page instead of a copy of the parent's.
+ *
+ * So allocate and fill this block in the PARENT (TEST_SETUP) and verify it in
+ * the child: it is inherited copy-on-write, so a zeroing COW fault shows up
+ * here as a run of zeros at a page boundary. The report goes out via raw
+ * write(2) -- stdio and malloc are both suspects, so neither may be used on
+ * the failure path.
+ */
+#define HEAP_CANARY_SZ (64u * 1024u)
+#define HEAP_CANARY_AT(i) ((unsigned char)(0xa5u ^ (unsigned char)((i) * 31u)))
+
+static unsigned char *heap_canary;
+
+static void heap_canary_init(void)
+{
+	size_t i;
+
+	if (heap_canary == NULL) {
+		heap_canary = malloc(HEAP_CANARY_SZ);
+	}
+	if (heap_canary == NULL) {
+		return;
+	}
+	for (i = 0; i < HEAP_CANARY_SZ; i++) {
+		heap_canary[i] = HEAP_CANARY_AT(i);
+	}
+}
+
+
+static void heap_canary_verify(const char *where)
+{
+	char msg[224];
+	size_t i, run;
+	int n;
+
+	if (heap_canary == NULL) {
+		return;
+	}
+
+	for (i = 0; i < HEAP_CANARY_SZ; i++) {
+		if (heap_canary[i] == HEAP_CANARY_AT(i)) {
+			continue;
+		}
+		/* Report the run length and whether it is zeros: a zeroed PAGE is the
+		 * COW signature, a single flipped byte is something else entirely. */
+		for (run = 0; ((i + run) < HEAP_CANARY_SZ) && (heap_canary[i + run] != HEAP_CANARY_AT(i + run)); run++) {
+		}
+		n = snprintf(msg, sizeof(msg),
+			"HEAP-CANARY at %s: off=%zu (page off %zu) got=0x%02x want=0x%02x run=%zu zeros=%d base=%p\n",
+			where, i, i % 4096u, heap_canary[i], HEAP_CANARY_AT(i), run,
+			(heap_canary[i] == 0) ? 1 : 0, (void *)heap_canary);
+		if (n > 0) {
+			(void)write(2, msg, (size_t)n);
+		}
+		_exit(96);
+	}
+}
+
+
 TEST_GROUP(test_unix_socket);
 
 
 TEST_SETUP(test_unix_socket)
 {
 	stdio_snapshot();
+	heap_canary_init();
 	size_t i;
 
 	srandom(time(NULL));
@@ -951,21 +1019,35 @@ static void unix_transfer(int type)
 	else {
 		size_t pos = 0;
 		ssize_t n;
+		/* Receive into the STACK, not the file-scope `buf` in .bss.
+		 *
+		 * The mismatch we are chasing ("recv returned bytes that appear
+		 * nowhere in data[]") has two very different explanations: the socket
+		 * delivered foreign bytes, or the page we read back is not the page
+		 * the kernel wrote -- a COW/aliasing bug on the child's .bss after
+		 * fork, which has bitten this exact path before (the PROT_USER
+		 * user-copy fault). A fresh stack buffer is private by construction,
+		 * so if the mismatch survives here it is the socket, and if it
+		 * disappears it was the shared-page path. */
+		char rbuf[sizeof(buf)];
 
 		stdio_verify("child-start");
+		heap_canary_verify("child-start");
 
 		while (tot_len > 0) {
-			n = recv(fd[1], buf, sizeof(buf), 0);
+			n = recv(fd[1], rbuf, sizeof(rbuf), 0);
 			stdio_verify("child-after-recv");
+			heap_canary_verify("child-after-recv");
 			CHILD_ASSERT(n > 0 || errno == EAGAIN);
 			if (n > 0) {
-				CHILD_ASSERT(unix_data_cmp(buf, pos, n) == 0);
+				CHILD_ASSERT(unix_data_cmp(rbuf, pos, n) == 0);
 				tot_len -= n;
 				pos = (pos + n) % sizeof(data);
 			}
 		}
 
 		stdio_verify("child-before-exit");
+		heap_canary_verify("child-before-exit");
 		exit(0);
 	}
 }
