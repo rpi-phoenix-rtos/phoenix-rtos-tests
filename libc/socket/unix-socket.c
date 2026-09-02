@@ -77,6 +77,28 @@
 
 static char data[DATA_SIZE];
 static char buf[DATA_SIZE];
+
+
+/* Checksum of data[] as it was when TEST_SETUP filled it. data[] is random, so
+ * there is no generator to re-derive it from -- but a checksum taken at fill
+ * time answers the only question that matters when a comparison fails: was the
+ * expected pattern still intact? */
+static unsigned long data_sum;
+
+static unsigned long unix_data_checksum(void)
+{
+	unsigned long h = 1469598103934665603UL; /* FNV-1a 64-bit offset basis */
+	size_t i;
+
+	for (i = 0; i < sizeof(data); ++i) {
+		h ^= (unsigned long)(unsigned char)data[i];
+		h *= 1099511628211UL;
+	}
+
+	return h;
+}
+
+
 static int pollTimeoutDelay = 30;
 static int transferLoopCnt = TRANSFER_LOOP_CNT;
 
@@ -156,6 +178,8 @@ TEST_SETUP(test_unix_socket)
 	for (i = 0; i < sizeof(data); i++) {
 		data[i] = rand();
 	}
+
+	data_sum = unix_data_checksum();
 }
 
 
@@ -762,13 +786,72 @@ TEST(test_unix_socket, dgram_sock_msg_fork)
 }
 
 
+static void unix_data_report(const char *buf_, size_t pos, size_t len, size_t i)
+{
+	unsigned long now = unix_data_checksum();
+	size_t k, base = (i > 4u) ? (i - 4u) : 0u;
+
+	/* The decisive datum: if data[] still checksums, the socket really
+	 * delivered the wrong bytes; if it does not, the expected pattern itself
+	 * was overwritten and this is memory corruption wearing a data-mismatch
+	 * costume. */
+	fprintf(stderr, "DATA-MISMATCH i=%u pos=%u len=%u got=0x%02x want=0x%02x data[]=%s\n",
+		(unsigned int)i, (unsigned int)pos, (unsigned int)len,
+		(unsigned char)buf_[i], (unsigned char)data[(pos + i) % sizeof(data)],
+		(now == data_sum) ? "INTACT" : "CORRUPTED");
+
+	fprintf(stderr, "DATA-MISMATCH  recv:");
+	for (k = base; (k < base + 8u) && (k < len); ++k) {
+		fprintf(stderr, " %02x", (unsigned char)buf_[k]);
+	}
+	fprintf(stderr, "\nDATA-MISMATCH  want:");
+	for (k = base; (k < base + 8u) && (k < len); ++k) {
+		fprintf(stderr, " %02x", (unsigned char)data[(pos + k) % sizeof(data)]);
+	}
+	fprintf(stderr, "\n");
+
+	/* Where do the received bytes actually live in data[]? A constant shift
+	 * means the two sides simply lost sync (and names the amount -- 8 bytes
+	 * would be a datagram length prefix delivered as payload, for instance);
+	 * "nowhere" means the bytes were never sent at all. */
+	{
+		size_t off, m;
+		int found = -1;
+
+		for (off = 0; off < sizeof(data); ++off) {
+			for (m = 0; (m < 8u) && ((i + m) < len); ++m) {
+				if (data[(off + m) % sizeof(data)] != (char)buf_[i + m]) {
+					break;
+				}
+			}
+			if ((m >= 8u) || ((i + m) >= len)) {
+				found = (int)off;
+				break;
+			}
+		}
+
+		if (found >= 0) {
+			unsigned int want_off = (unsigned int)((pos + i) % sizeof(data));
+			fprintf(stderr, "DATA-MISMATCH  recv found at data[%d], expected data[%u], shift %d\n",
+				found, want_off, found - (int)want_off);
+		}
+		else {
+			fprintf(stderr, "DATA-MISMATCH  recv bytes appear nowhere in data[] (never sent)\n");
+		}
+	}
+	fflush(stderr);
+}
+
+
 static int unix_data_cmp(char *buf, size_t pos, size_t len)
 {
 	size_t i;
 
 	for (i = 0; i < len; ++i) {
-		if (buf[i] != data[(pos + i) % sizeof(data)])
+		if (buf[i] != data[(pos + i) % sizeof(data)]) {
+			unix_data_report(buf, pos, len, i);
 			return 1;
+		}
 	}
 
 	return 0;
