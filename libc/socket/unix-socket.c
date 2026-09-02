@@ -38,19 +38,37 @@
 #define BAD_FD 33333 /* should be bad descriptor */
 
 
+/* A child that fails says so before it goes.
+ *
+ * Both of these used to exit(1) silently, so every child-side failure reached
+ * the parent as nothing but a status code -- and the parent only asserts
+ * WIFEXITED/WEXITSTATUS, so the log showed "Expected 0 Was 1" with no clue
+ * which check failed or why. On the rpi4b port, where these tests are being
+ * used to chase an intermittent fault, that turned every child failure into a
+ * dead end. errno is included because the failing predicate is almost always a
+ * syscall result. */
+#define CHILD_FAIL(what) \
+	do { \
+		fprintf(stderr, "CHILD-FAIL %s:%d: %s (errno=%d)\n", __FILE__, __LINE__, (what), errno); \
+		fflush(stderr); \
+		exit(1); \
+	} while (0)
+
+
 #define FAIL_OR_EXIT(pid, msg) \
 	do { \
 		if (pid != 0) \
 			FAIL(msg); \
 		else \
-			exit(1); \
+			CHILD_FAIL(msg); \
 	} while (0)
 
 
 #define CHILD_ASSERT(pred) \
 	do { \
-		if (!(pred)) \
-			exit(1); \
+		if (!(pred)) { \
+			CHILD_FAIL(#pred); \
+		} \
 	} while (0)
 
 
