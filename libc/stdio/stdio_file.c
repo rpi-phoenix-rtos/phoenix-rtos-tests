@@ -219,6 +219,37 @@ TEST(stdio_fopenfclose, fdopen_file)
 }
 
 
+TEST(stdio_fopenfclose, stdio_fclose_twice)
+{
+	FILE *f = fopen(STDIO_TEST_FILENAME, "w");
+
+	TEST_ASSERT_NOT_NULL(f);
+	TEST_ASSERT_EQUAL_INT(0, fclose(f));
+
+	/*
+	 * Closing the same FILE again is undefined behaviour per C, but on an RTOS
+	 * it must not be a WILD WRITE. It used to be: fclose() called file_free()
+	 * unconditionally, so the second call re-entered lib_listRemove() with the
+	 * FILE's list links already NULL and did `t->prev->next = t->next` through
+	 * a NULL pointer -- an EL0 Data Abort with far=0x10 (the `next` offset in
+	 * FILE), and, when the block had been reused, a second free() of somebody
+	 * else's allocation. Seen 2026-09-04 as a crash while quake3e loaded a map.
+	 *
+	 * fclose() now unlinks first and reports EOF/EBADF for a FILE that is no
+	 * longer on the open list, so this test both pins the behaviour and would
+	 * fault immediately on a regression.
+	 */
+	errno = 0;
+	TEST_ASSERT_EQUAL_INT(EOF, fclose(f));
+	TEST_ASSERT_EQUAL_INT(EBADF, errno);
+
+	/* And the stream list must still be usable afterwards. */
+	f = fopen(STDIO_TEST_FILENAME, "r");
+	TEST_ASSERT_NOT_NULL(f);
+	TEST_ASSERT_EQUAL_INT(0, fclose(f));
+}
+
+
 TEST_GROUP_RUNNER(stdio_fopenfclose)
 {
 	RUN_TEST_CASE(stdio_fopenfclose, stdio_fopenfclose_file);
@@ -226,6 +257,7 @@ TEST_GROUP_RUNNER(stdio_fopenfclose)
 	RUN_TEST_CASE(stdio_fopenfclose, stdio_fopenfclose_zeropath);
 	RUN_TEST_CASE(stdio_fopenfclose, stdio_fopenfclose_wrongflags);
 	RUN_TEST_CASE(stdio_fopenfclose, stdio_fopenfclose_modemodifiers);
+	RUN_TEST_CASE(stdio_fopenfclose, stdio_fclose_twice);
 	RUN_TEST_CASE(stdio_fopenfclose, stdio_fopenfclose_toolongname);
 	RUN_TEST_CASE(stdio_fopenfclose, freopen_file);
 	RUN_TEST_CASE(stdio_fopenfclose, fdopen_file)
