@@ -565,10 +565,55 @@ TEST(test_pthread_guard, explicit_zero_guard_is_honoured)
 }
 
 
+/* A default stack must be big enough for ordinary library code. PTHREAD_STACK_MIN
+ * is a POSIX floor (256 => one page once aligned), and at that size libjpeg's
+ * Huffman-table setup overflows while doing nothing unusual. Assert a floor well
+ * above a single page so a regression to "the minimum is the default" is caught
+ * here rather than by a crash inside some port. */
+TEST(test_pthread_guard, default_attr_stack_fits_real_code)
+{
+	pthread_attr_t attr;
+	size_t stacksize = 0;
+
+	TEST_ASSERT_EQUAL_INT(0, pthread_attr_init(&attr));
+	TEST_ASSERT_EQUAL_INT(0, pthread_attr_getstacksize(&attr, &stacksize));
+	TEST_ASSERT_GREATER_OR_EQUAL_UINT(64u * 1024u, stacksize);
+	TEST_ASSERT_EQUAL_INT(0, pthread_attr_destroy(&attr));
+}
+
+
+/* And a thread created with that default must actually run: a stacksize the
+ * allocator cannot satisfy would show up as a pthread_create failure, not as a
+ * wrong attribute. */
+static void *guard_probe_thread(void *arg)
+{
+	volatile char probe[8192];
+
+	probe[0] = 1;
+	probe[sizeof(probe) - 1] = 2;
+	*(int *)arg = probe[0] + probe[sizeof(probe) - 1];
+
+	return NULL;
+}
+
+
+TEST(test_pthread_guard, default_thread_runs_with_an_8k_frame)
+{
+	pthread_t tid;
+	int result = 0;
+
+	TEST_ASSERT_EQUAL_INT(0, pthread_create(&tid, NULL, guard_probe_thread, &result));
+	TEST_ASSERT_EQUAL_INT(0, pthread_join(tid, NULL));
+	TEST_ASSERT_EQUAL_INT(3, result);
+}
+
+
 TEST_GROUP_RUNNER(test_pthread_guard)
 {
 	RUN_TEST_CASE(test_pthread_guard, default_attr_has_guard_page);
 	RUN_TEST_CASE(test_pthread_guard, explicit_zero_guard_is_honoured);
+	RUN_TEST_CASE(test_pthread_guard, default_attr_stack_fits_real_code);
+	RUN_TEST_CASE(test_pthread_guard, default_thread_runs_with_an_8k_frame);
 }
 
 
