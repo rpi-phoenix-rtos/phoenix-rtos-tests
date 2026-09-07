@@ -406,6 +406,7 @@ TEST_GROUP_RUNNER(test_pthread_cleanup)
 
 
 TEST_GROUP(test_pthread_detach);
+TEST_GROUP(test_pthread_guard);
 
 
 TEST_SETUP(test_pthread_detach)
@@ -510,6 +511,64 @@ TEST_GROUP_RUNNER(test_pthread_detach)
 	RUN_TEST_CASE(test_pthread_detach, detach_stale_handle_no_uaf);
 	RUN_TEST_CASE(test_pthread_detach, detach_null_handle);
 	RUN_TEST_CASE(test_pthread_detach, detached_burst_stack_reclaim);
+}
+
+
+/*
+ * A default-attribute thread must come with a guard page.
+ *
+ * Without one, a thread that overruns its stack writes silently into whatever
+ * is mapped below it -- a neighbouring thread's stack or the heap -- and the
+ * crash then surfaces somewhere unrelated to the cause. Two such overflows have
+ * been root-caused in this port, and each cost a full investigation; the guard
+ * turns them into an immediate fault at the offending store instead.
+ *
+ * Asserted on the attribute rather than by actually overflowing a stack: a real
+ * overflow kills the process, which a unit test cannot then report.
+ */
+TEST_SETUP(test_pthread_guard)
+{
+}
+
+
+TEST_TEAR_DOWN(test_pthread_guard)
+{
+}
+
+
+TEST(test_pthread_guard, default_attr_has_guard_page)
+{
+	pthread_attr_t attr;
+	size_t guardsize = 0;
+
+	TEST_ASSERT_EQUAL_INT(0, pthread_attr_init(&attr));
+	TEST_ASSERT_EQUAL_INT(0, pthread_attr_getguardsize(&attr, &guardsize));
+	/* Nonzero rather than a specific size: the page size differs per arch, and
+	 * what matters is that a guard exists at all. */
+	TEST_ASSERT_GREATER_THAN_UINT(0, guardsize);
+	TEST_ASSERT_EQUAL_INT(0, pthread_attr_destroy(&attr));
+}
+
+
+/* An explicit 0 must still mean "no guard" -- the new default must not override
+ * a caller that deliberately asked for none. */
+TEST(test_pthread_guard, explicit_zero_guard_is_honoured)
+{
+	pthread_attr_t attr;
+	size_t guardsize = 1;
+
+	TEST_ASSERT_EQUAL_INT(0, pthread_attr_init(&attr));
+	TEST_ASSERT_EQUAL_INT(0, pthread_attr_setguardsize(&attr, 0));
+	TEST_ASSERT_EQUAL_INT(0, pthread_attr_getguardsize(&attr, &guardsize));
+	TEST_ASSERT_EQUAL_UINT(0, guardsize);
+	TEST_ASSERT_EQUAL_INT(0, pthread_attr_destroy(&attr));
+}
+
+
+TEST_GROUP_RUNNER(test_pthread_guard)
+{
+	RUN_TEST_CASE(test_pthread_guard, default_attr_has_guard_page);
+	RUN_TEST_CASE(test_pthread_guard, explicit_zero_guard_is_honoured);
 }
 
 

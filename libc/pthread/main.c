@@ -25,6 +25,7 @@ void runner(void)
 	RUN_TEST_GROUP(test_pthread_detach);
 	RUN_TEST_GROUP(test_pthread_newlocks);
 	RUN_TEST_GROUP(test_pthread_fdrace);
+	RUN_TEST_GROUP(test_pthread_guard);
 }
 
 
