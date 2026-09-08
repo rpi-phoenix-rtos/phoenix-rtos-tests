@@ -1843,8 +1843,112 @@ TEST(stdio_fflush, stdio_fflush_eagain)
 }
 
 
+TEST(stdio_fflush, stdio_fflush_eagain_partial)
+{
+#ifdef _PHOENIX_POSIX_SOCKET_H_
+	/*
+	 * A PARTIAL flush must consume exactly what went out and resume from the
+	 * remainder. It used to leave the buffer position spanning the whole buffer,
+	 * so the next fflush() re-transmitted the bytes that had already been
+	 * written -- duplicating output -- and never resumed the tail. Seen on real
+	 * hardware as 234113 identical copies of one buffer tail on a UART.
+	 */
+	enum { gap = 64, payload = 512, fillsz = 256 };
+	int err, fd[2];
+	FILE *fp;
+	char fbuf[payload * 2];
+	char out[payload];
+	char got[payload * 2];
+	char sink[fillsz];
+	ssize_t n;
+	size_t total = 0;
+	int i;
+
+	err = socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0, fd);
+	TEST_ASSERT_EQUAL_INT(0, err);
+
+	/* Fill the receiver's socket buffer at the fd level, so the FILE buffer
+	 * below starts empty and every later byte movement is ours. */
+	memset(sink, 'F', sizeof(sink));
+	for (;;) {
+		n = write(fd[1], sink, sizeof(sink));
+		if (n < 0) {
+			TEST_ASSERT_EQUAL_INT(EAGAIN, errno);
+			break;
+		}
+	}
+
+	/* Re-open the writer with a buffer large enough to hold the whole payload,
+	 * so nothing leaves until we call fflush() explicitly. */
+	fp = fdopen(fd[1], "w");
+	TEST_ASSERT_NOT_NULL(fp);
+	err = setvbuf(fp, fbuf, _IOFBF, sizeof(fbuf));
+	TEST_ASSERT_EQUAL_INT(0, err);
+
+	/* Free exactly `gap` bytes in the receiver, so the next flush can only
+	 * partially succeed. */
+	n = read(fd[0], got, gap);
+	TEST_ASSERT_EQUAL_INT(gap, n);
+
+	/* Distinct bytes, so any duplication is detectable. */
+	for (i = 0; i < payload; ++i) {
+		out[i] = (char)('a' + (i % 26));
+	}
+	TEST_ASSERT_EQUAL_INT(payload, fwrite(out, 1, payload, fp));
+
+	/* Partial: `gap` bytes fit, the rest cannot. */
+	errno = 0;
+	TEST_ASSERT_EQUAL_INT(-1, fflush(fp));
+	TEST_ASSERT_EQUAL_INT(EAGAIN, errno);
+
+	/* Drain everything the receiver holds, discarding the fill bytes. */
+	for (;;) {
+		n = read(fd[0], got, sizeof(got));
+		if (n < 0) {
+			TEST_ASSERT_EQUAL_INT(EAGAIN, errno);
+			break;
+		}
+		for (i = 0; i < n; ++i) {
+			if (got[i] != 'F') {
+				TEST_ASSERT_TRUE(total < payload);
+				TEST_ASSERT_EQUAL_INT(out[total], got[i]);
+				total++;
+			}
+		}
+	}
+
+	/* Now there is room: the rest of the payload must go out, and ONLY the
+	 * rest -- re-transmitting the consumed prefix would break the sequence
+	 * assert above or overshoot `payload`. */
+	clearerr(fp);
+	TEST_ASSERT_EQUAL_INT(0, fflush(fp));
+
+	for (;;) {
+		n = read(fd[0], got, sizeof(got));
+		if (n < 0) {
+			TEST_ASSERT_EQUAL_INT(EAGAIN, errno);
+			break;
+		}
+		for (i = 0; i < n; ++i) {
+			TEST_ASSERT_TRUE(total < payload);
+			TEST_ASSERT_EQUAL_INT(out[total], got[i]);
+			total++;
+		}
+	}
+
+	/* Every payload byte delivered exactly once. */
+	TEST_ASSERT_EQUAL_INT(payload, total);
+
+	fclose(fp);
+	close(fd[0]);
+#else
+	TEST_IGNORE_MESSAGE("Sockets are not supported");
+#endif
+}
+
 TEST_GROUP_RUNNER(stdio_fflush)
 {
 	RUN_TEST_CASE(stdio_fflush, stdio_fflush_socket);
 	RUN_TEST_CASE(stdio_fflush, stdio_fflush_eagain);
+	RUN_TEST_CASE(stdio_fflush, stdio_fflush_eagain_partial);
 }
