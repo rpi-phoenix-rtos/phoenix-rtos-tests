@@ -1795,7 +1795,7 @@ TEST(stdio_fflush, stdio_fflush_socket)
 
 TEST(stdio_fflush, stdio_fflush_eagain)
 {
-#ifdef _PHOENIX_POSIX_SOCKET_H_
+#if defined(_PHOENIX_POSIX_SOCKET_H_) || defined(_SYS_SOCKET_H_)
 	int err;
 	size_t n;
 	int fd[2];
@@ -1845,7 +1845,7 @@ TEST(stdio_fflush, stdio_fflush_eagain)
 
 TEST(stdio_fflush, stdio_fflush_eagain_partial)
 {
-#ifdef _PHOENIX_POSIX_SOCKET_H_
+#if defined(_PHOENIX_POSIX_SOCKET_H_) || defined(_SYS_SOCKET_H_)
 	/*
 	 * A PARTIAL flush must consume exactly what went out and resume from the
 	 * remainder. It used to leave the buffer position spanning the whole buffer,
