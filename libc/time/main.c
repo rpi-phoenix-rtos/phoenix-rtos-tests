@@ -25,6 +25,7 @@ void runner(void)
 	RUN_TEST_GROUP(test_lutimes);
 	RUN_TEST_GROUP(time_timeval);
 	RUN_TEST_GROUP(time_strptime);
+	RUN_TEST_GROUP(time_clock);
 }
 
 
