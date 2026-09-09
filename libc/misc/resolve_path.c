@@ -517,6 +517,66 @@ TEST(resolve_path, symlink_long_resolution)
 }
 
 
+TEST(resolve_path, symlink_target_does_not_fit)
+{
+	/* The budget _resolve_abspath() gives readlink() for a component is the
+	 * number of path bytes already consumed (`p - path`), so a symlink near the
+	 * START of a path gets almost none. Here the symlink name is one character,
+	 * so the budget is 1 and even a "/" target hits the limit. The resolver must
+	 * reject that cleanly.
+	 *
+	 * Why this test exists: after readlink() the resolver walks BACKWARDS
+	 * through its own PATH_MAX heap block --
+	 *
+	 *     p -= 1; *p = '/'; p -= symlink_len; memmove(p, path, symlink_len);
+	 *
+	 * -- so a symlink_len larger than the budget puts `p` before the start of
+	 * the allocation and writes over the block's own malloc chunk header. That
+	 * surfaces later as a "double free" on a header that still validates,
+	 * nowhere near its cause. The only guard was an assert(), which -DNDEBUG
+	 * deletes. The resolver now rejects >= budget, and _readlink_abs() clamps
+	 * the byte count a server reports against the size it was offered.
+	 *
+	 * SCOPE: this exercises the boundary (len == budget) and then checks heap
+	 * integrity. The len > budget case needs a server that over-reports
+	 * msg.o.err, which userspace cannot arrange -- that one is covered by the
+	 * clamp in _readlink_abs(), not by this test. */
+	char resolved[PATH_MAX + 1];
+	const char symName[] = "q";
+
+	unlink(symName);
+	TEST_ASSERT_EQUAL_INT(0, symlink("/", symName));
+
+	errno = 0;
+	if (realpath("q/dev", resolved) == NULL) {
+		/* Budget 1, target "/" of length 1 -> at the limit, so truncation
+		 * cannot be ruled out and ENAMETOOLONG is the defined answer. */
+		TEST_ASSERT_EQUAL_INT(ENAMETOOLONG, errno);
+	}
+	else {
+		/* If a future resolver does handle it, it must be RIGHT -- a
+		 * wrong-but-plausible path is what a header smash produces. */
+		TEST_ASSERT_EQUAL_STRING("/dev", resolved);
+	}
+
+	/* The corruption check, and the point of the test: had the resolver written
+	 * below its own block, the header is now damaged and this is where the
+	 * allocator notices -- either a "double free" report on the free() below or
+	 * a bad pointer back from malloc(). */
+	{
+		void *blk = malloc(PATH_MAX);
+		TEST_ASSERT_NOT_NULL(blk);
+		memset(blk, 0xa5, PATH_MAX);
+		free(blk);
+		blk = malloc(PATH_MAX);
+		TEST_ASSERT_NOT_NULL(blk);
+		free(blk);
+	}
+
+	unlink(symName);
+}
+
+
 TEST_GROUP_RUNNER(resolve_path)
 {
 	RUN_TEST_CASE(resolve_path, canonicalize_abs_simple);
@@ -540,4 +600,5 @@ TEST_GROUP_RUNNER(resolve_path)
 	RUN_TEST_CASE(resolve_path, symlink_loop);
 	RUN_TEST_CASE(resolve_path, symlink_rename);
 	RUN_TEST_CASE(resolve_path, symlink_long_resolution);
+	RUN_TEST_CASE(resolve_path, symlink_target_does_not_fit);
 }
