@@ -117,10 +117,48 @@ TEST(posix_options, claims_are_backed_by_callable_functions)
 	/* _POSIX_MONOTONIC_CLOCK / _POSIX_TIMERS (clock side) */
 	TEST_ASSERT_EQUAL_INT(0, clock_getres(CLOCK_MONOTONIC, &res));
 
-	/* _POSIX_CLOCK_SELECTION */
+	/* _POSIX_CLOCK_SELECTION. POSIX ties this option to TWO things: the
+	 * clock_nanosleep() family AND the ability to select the clock a condition
+	 * variable times out against, so both are exercised. The second half is the
+	 * one that matters in practice -- a portable timed wait that must not be
+	 * disturbed when ntpclient steps the wall clock selects CLOCK_MONOTONIC
+	 * here, and silently gets realtime semantics if the claim is hollow. */
 	{
 		struct timespec req = { .tv_sec = 0, .tv_nsec = 1000000 };
 		TEST_ASSERT_EQUAL_INT(0, clock_nanosleep(CLOCK_MONOTONIC, 0, &req, NULL));
+	}
+	{
+		pthread_condattr_t cattr;
+		pthread_cond_t cond;
+		pthread_mutex_t mutex;
+		clockid_t readback = (clockid_t)-1;
+		struct timespec deadline;
+
+		TEST_ASSERT_EQUAL_INT(0, pthread_condattr_init(&cattr));
+		TEST_ASSERT_EQUAL_INT(0, pthread_condattr_setclock(&cattr, CLOCK_MONOTONIC));
+		TEST_ASSERT_EQUAL_INT(0, pthread_condattr_getclock(&cattr, &readback));
+		TEST_ASSERT_EQUAL_INT(CLOCK_MONOTONIC, readback);
+
+		/* And the selection has to reach the wait: time out against a deadline
+		 * read from the SELECTED clock. If the cond were still on realtime this
+		 * absolute monotonic deadline would be interpreted against a different
+		 * epoch, and the wait would return immediately or hang rather than
+		 * report ETIMEDOUT. */
+		TEST_ASSERT_EQUAL_INT(0, pthread_cond_init(&cond, &cattr));
+		TEST_ASSERT_EQUAL_INT(0, pthread_mutex_init(&mutex, NULL));
+		TEST_ASSERT_EQUAL_INT(0, clock_gettime(CLOCK_MONOTONIC, &deadline));
+		deadline.tv_nsec += 20 * 1000 * 1000;
+		if (deadline.tv_nsec >= 1000000000L) {
+			deadline.tv_nsec -= 1000000000L;
+			deadline.tv_sec += 1;
+		}
+		TEST_ASSERT_EQUAL_INT(0, pthread_mutex_lock(&mutex));
+		TEST_ASSERT_EQUAL_INT(ETIMEDOUT, pthread_cond_timedwait(&cond, &mutex, &deadline));
+		TEST_ASSERT_EQUAL_INT(0, pthread_mutex_unlock(&mutex));
+
+		TEST_ASSERT_EQUAL_INT(0, pthread_mutex_destroy(&mutex));
+		TEST_ASSERT_EQUAL_INT(0, pthread_cond_destroy(&cond));
+		TEST_ASSERT_EQUAL_INT(0, pthread_condattr_destroy(&cattr));
 	}
 
 	/* _POSIX_READER_WRITER_LOCKS */
