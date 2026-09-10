@@ -548,6 +548,12 @@ TEST_GROUP_RUNNER(string_memcmp)
  * vacuously -- the failure mode being tested is a READ, so the guard has to be a
  * genuinely absent mapping.
  *
+ * That the guard is real was checked, not assumed: unmapping the second page of a
+ * two-page mapping is a TAIL TRIM, and the kernel's _vm_munmap() (vm/map.c) handles
+ * it explicitly -- `else if ((ptr_t)(e->vaddr + e->size) == overlapEnd)` shrinks the
+ * entry rather than ignoring the request. If that ever stops splitting entries this
+ * test goes quietly green while testing nothing, so re-check it there first.
+ *
  * Regression test for a real fault: strncmp() looped on `*p && k < n`, and C's
  * left-to-right evaluation reads us1[n] before the bound is checked. On a
  * Raspberry Pi 4 that came back as Exception #36: Data Abort (EL0), far at a page
