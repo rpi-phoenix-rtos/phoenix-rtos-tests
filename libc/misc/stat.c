@@ -568,6 +568,15 @@ TEST(stat_mode, sock_type)
 
 TEST_SETUP(stat_nlink_size_blk_tim)
 {
+	/* Start from a known link count. This group hard-links `path` to symPath,
+	 * tempPath and "test_stat_another_link_path", and its tear-down removes only
+	 * `path` -- so a case that fails part-way leaves the others behind, and the
+	 * next run's link() hits EEXIST or counts a stale inode. stat_mode's setup
+	 * already does exactly this cleaning; this group was missing it. */
+	remove(symPath);
+	remove(tempPath);
+	remove("test_stat_another_link_path");
+	remove(path);
 	fd = open(path, O_CREAT, 0666);
 }
 
@@ -576,6 +585,11 @@ TEST_TEAR_DOWN(stat_nlink_size_blk_tim)
 {
 	close(fd);
 	remove(path);
+	/* Also the hard links: a case that aborts mid-way never reaches its own
+	 * unlink()s, and the leftovers then change what the NEXT run measures. */
+	remove(symPath);
+	remove(tempPath);
+	remove("test_stat_another_link_path");
 }
 
 
@@ -608,10 +622,15 @@ TEST(stat_nlink_size_blk_tim, nlink)
 	TEST_ASSERT_EQUAL_INT(0, fstat(fd, &buffer));
 	TEST_ASSERT_EQUAL_INT(4, buffer.st_nlink);
 
-	unlink(symPath);
+	/* Assert the unlink itself. Without this a failed unlink() and a stale
+	 * st_nlink look identical -- which is precisely why the intermittent
+	 * "Expected 3 Was 4" here resisted attribution. */
+	errno = 0;
+	TEST_ASSERT_EQUAL_INT_MESSAGE(0, unlink(symPath), "unlink(symPath) failed");
+	TEST_ASSERT_EQUAL_INT_MESSAGE(0, errno, "unlink(symPath) set errno");
 
 	TEST_ASSERT_EQUAL_INT(0, stat(path, &buffer));
-	TEST_ASSERT_EQUAL_INT(3, buffer.st_nlink);
+	TEST_ASSERT_EQUAL_INT_MESSAGE(3, buffer.st_nlink, "st_nlink after unlink(symPath)");
 
 	TEST_ASSERT_EQUAL_INT(0, lstat(path, &buffer));
 	TEST_ASSERT_EQUAL_INT(3, buffer.st_nlink);
@@ -619,10 +638,12 @@ TEST(stat_nlink_size_blk_tim, nlink)
 	TEST_ASSERT_EQUAL_INT(0, fstat(fd, &buffer));
 	TEST_ASSERT_EQUAL_INT(3, buffer.st_nlink);
 
-	unlink(tempPath);
+	errno = 0;
+	TEST_ASSERT_EQUAL_INT_MESSAGE(0, unlink(tempPath), "unlink(tempPath) failed");
+	TEST_ASSERT_EQUAL_INT_MESSAGE(0, errno, "unlink(tempPath) set errno");
 
 	TEST_ASSERT_EQUAL_INT(0, stat(path, &buffer));
-	TEST_ASSERT_EQUAL_INT(2, buffer.st_nlink);
+	TEST_ASSERT_EQUAL_INT_MESSAGE(2, buffer.st_nlink, "st_nlink after unlink(tempPath)");
 
 	TEST_ASSERT_EQUAL_INT(0, lstat(path, &buffer));
 	TEST_ASSERT_EQUAL_INT(2, buffer.st_nlink);
@@ -630,7 +651,8 @@ TEST(stat_nlink_size_blk_tim, nlink)
 	TEST_ASSERT_EQUAL_INT(0, fstat(fd, &buffer));
 	TEST_ASSERT_EQUAL_INT(2, buffer.st_nlink);
 
-	unlink(anotherPath);
+	errno = 0;
+	TEST_ASSERT_EQUAL_INT_MESSAGE(0, unlink(anotherPath), "unlink(anotherPath) failed");
 }
 
 
