@@ -580,6 +580,102 @@ TEST(stdlib_alloc, malloc_fragment_and_drain)
 }
 
 
+/* Churn the allocator the way the RPi4 showcase does, and check the PAYLOAD.
+ *
+ * Motivation: a heap-recycling defect in libphoenix's allocator reproduces only
+ * about 1 SuperTuxKart run in 4, i.e. once per ~25 minutes of Pi time, which is
+ * far too slow to iterate on. The field reports pinned the shape precisely --
+ * requests that get a heap to themselves (heap 0xd000 = 53248 bytes, so a request
+ * of 53193..53232), a 32768-byte block as that heap's first chunk, and free-bin
+ * entries that later resolve to already-released memory -- so drive exactly that
+ * mix here and look for the damage directly.
+ *
+ * Why the payload and not just the return values: the observed failure hands out
+ * or retains a block whose memory has been recycled, and an allocator that does
+ * that still returns non-NULL, correctly aligned pointers. Only the CONTENTS give
+ * it away. Each block is stamped with a per-slot, per-offset pattern and verified
+ * before it is freed, so a block handed to two owners, or one whose heap was
+ * released underneath it, fails here rather than surfacing later as a Data Abort
+ * inside malloc_chunkSize().
+ *
+ * The sizes are deliberate, not arbitrary: 53200 lands in the window that gets its
+ * own mmap'd heap, 32752 rounds to the 32768 chunk seen as such a heap's first
+ * block, and 200 keeps the small bins in play, since the bad pointer was observed
+ * arriving through the small-bin head as well as the large-bin tree. Freeing every
+ * slot on the closing round drives heaps to fully-free so they are released and
+ * their addresses recycled, which is the transition under test.
+ */
+TEST(stdlib_alloc, malloc_heap_recycle_churn)
+{
+	enum { SLOTS = 12, ROUNDS = 120 };
+	static const size_t sizes[3] = { 53200u, 32752u, 200u };
+	unsigned char *slot[SLOTS];
+	size_t slotsz[SLOTS];
+	unsigned int round, i;
+	size_t k;
+
+	for (i = 0; i < SLOTS; i++) {
+		slot[i] = NULL;
+		slotsz[i] = 0;
+	}
+
+	for (round = 0; round < ROUNDS; round++) {
+		for (i = 0; i < SLOTS; i++) {
+			if (slot[i] == NULL) {
+				size_t want = sizes[(round + i) % 3u];
+
+				slot[i] = malloc(want);
+				TEST_ASSERT_NOT_NULL(slot[i]);
+				slotsz[i] = want;
+
+				/* Stamp head, tail and a middle byte; a full memset of 53 kB
+				 * x 12 x 120 rounds would dominate the runtime for no extra
+				 * discrimination. */
+				slot[i][0] = (unsigned char)(i * 31u + 1u);
+				slot[i][want / 2u] = (unsigned char)(i * 31u + 2u);
+				slot[i][want - 1u] = (unsigned char)(i * 31u + 3u);
+			}
+			else if (((round + i) & 1u) != 0u) {
+				size_t have = slotsz[i];
+
+				TEST_ASSERT_EQUAL_UINT8((unsigned char)(i * 31u + 1u), slot[i][0]);
+				TEST_ASSERT_EQUAL_UINT8((unsigned char)(i * 31u + 2u), slot[i][have / 2u]);
+				TEST_ASSERT_EQUAL_UINT8((unsigned char)(i * 31u + 3u), slot[i][have - 1u]);
+
+				free(slot[i]);
+				slot[i] = NULL;
+				slotsz[i] = 0;
+			}
+		}
+	}
+
+	/* Drain: every heap should end fully free and be released. */
+	for (i = 0; i < SLOTS; i++) {
+		if (slot[i] != NULL) {
+			size_t have = slotsz[i];
+
+			TEST_ASSERT_EQUAL_UINT8((unsigned char)(i * 31u + 1u), slot[i][0]);
+			TEST_ASSERT_EQUAL_UINT8((unsigned char)(i * 31u + 3u), slot[i][have - 1u]);
+			free(slot[i]);
+			slot[i] = NULL;
+		}
+	}
+
+	/* Allocate once more: this comes out of a recycled address range, and must
+	 * still be a usable block. */
+	for (k = 0; k < 3u; k++) {
+		unsigned char *again = malloc(sizes[k]);
+
+		TEST_ASSERT_NOT_NULL(again);
+		again[0] = 0x5au;
+		again[sizes[k] - 1u] = 0xa5u;
+		TEST_ASSERT_EQUAL_UINT8(0x5au, again[0]);
+		TEST_ASSERT_EQUAL_UINT8(0xa5u, again[sizes[k] - 1u]);
+		free(again);
+	}
+}
+
+
 TEST_GROUP_RUNNER(stdlib_alloc)
 {
 	RUN_TEST_CASE(stdlib_alloc, malloc_basic);
@@ -589,6 +685,7 @@ TEST_GROUP_RUNNER(stdlib_alloc)
 	RUN_TEST_CASE(stdlib_alloc, malloc_zero);
 	RUN_TEST_CASE(stdlib_alloc, malloc_iterate);
 	RUN_TEST_CASE(stdlib_alloc, malloc_fragment_and_drain);
+	RUN_TEST_CASE(stdlib_alloc, malloc_heap_recycle_churn);
 	RUN_TEST_CASE(stdlib_alloc, malloc_overflow);
 	RUN_TEST_CASE(stdlib_alloc, calloc_basic);
 	RUN_TEST_CASE(stdlib_alloc, calloc_zero);
