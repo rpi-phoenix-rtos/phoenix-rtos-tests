@@ -8,6 +8,7 @@
  *    - memcmp()
  *    - strcmp()
  *    - strncmp()
+ *    - strncasecmp()
  *    - strcoll()
  *
  * Copyright 2023 Phoenix Systems
@@ -24,6 +25,8 @@
 #include <string.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <strings.h>
+#include <sys/mman.h>
 #include <unity_fixture.h>
 
 #include "testdata.h"
@@ -534,6 +537,58 @@ TEST_GROUP_RUNNER(string_memcmp)
 }
 
 
+/* An n-bounded compare must read AT MOST n bytes from each operand. The way to
+ * prove it is to make byte n unreadable: map two pages, unmap the second, and
+ * hand the function a string whose last byte is the final byte of the first
+ * page, with NO terminator after it. An implementation that dereferences one
+ * byte too far faults here instead of returning.
+ *
+ * munmap (not mprotect) makes the guard, because mprotect is best-effort on this
+ * target and a PROT_NONE page that stays readable would make this test pass
+ * vacuously -- the failure mode being tested is a READ, so the guard has to be a
+ * genuinely absent mapping.
+ *
+ * Regression test for a real fault: strncmp() looped on `*p && k < n`, and C's
+ * left-to-right evaluation reads us1[n] before the bound is checked. On a
+ * Raspberry Pi 4 that came back as Exception #36: Data Abort (EL0), far at a page
+ * base, inside strncmp with n=1, reached from AngelScript's tokenizer. It needs a
+ * string ending exactly at a page boundary, so it presented as an intermittent
+ * crash. strncasecmp() had the identical loop and no test coverage at all.
+ */
+TEST(string_strncmp, no_read_past_n_at_page_edge)
+{
+	long pagesz = sysconf(_SC_PAGESIZE);
+	char *region, *edge;
+
+	TEST_ASSERT_GREATER_THAN_INT(0, pagesz);
+
+	region = mmap(NULL, 2 * (size_t)pagesz, PROT_READ | PROT_WRITE,
+			MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	TEST_ASSERT_NOT_EQUAL_MESSAGE(MAP_FAILED, region, "cannot map the guard region");
+
+	/* Drop the second page: reading region[pagesz] now faults. */
+	TEST_ASSERT_EQUAL_INT(0, munmap(region + pagesz, (size_t)pagesz));
+
+	/* Deliberately unterminated: every readable byte is 'x'. */
+	memset(region, 'x', (size_t)pagesz);
+	edge = region + pagesz - 1;
+
+	/* Equal on the last readable byte: must not look at byte 1. */
+	TEST_ASSERT_EQUAL_INT(0, strncmp(edge, "x", 1));
+	TEST_ASSERT_EQUAL_INT(0, strncasecmp(edge, "X", 1));
+
+	/* Unequal on byte 0: decided before the bound matters either way. */
+	TEST_ASSERT_LESS_THAN_INT(0, strncmp(edge, "y", 1));
+	TEST_ASSERT_GREATER_THAN_INT(0, strncmp(edge, "w", 1));
+
+	/* n == 0 permits no read at all, so even a wholly invalid pointer is legal. */
+	TEST_ASSERT_EQUAL_INT(0, strncmp(region + pagesz, "x", 0));
+	TEST_ASSERT_EQUAL_INT(0, strncasecmp(region + pagesz, "x", 0));
+
+	TEST_ASSERT_EQUAL_INT(0, munmap(region, (size_t)pagesz));
+}
+
+
 TEST_GROUP_RUNNER(string_strncmp)
 {
 	RUN_TEST_CASE(string_strncmp, basic);
@@ -542,6 +597,7 @@ TEST_GROUP_RUNNER(string_strncmp)
 	RUN_TEST_CASE(string_strncmp, big);
 	RUN_TEST_CASE(string_strncmp, various_sizes);
 	RUN_TEST_CASE(string_strncmp, offsets);
+	RUN_TEST_CASE(string_strncmp, no_read_past_n_at_page_edge);
 }
 
 
