@@ -1555,6 +1555,28 @@ TEST(test_unix_socket, accept_connect_async)
 }
 
 
+/* libphoenix's allocator self-check. Exported from malloc_dl.c and compiled
+ * unconditionally, but declared in no header -- hence the extern here.
+ *
+ * It walks every small bin and every large-bin rbtree (plus each same-size list)
+ * and asserts, among other things, !(chunk->size & CHUNK_CUSED): a chunk sitting
+ * in a FREE bin must not be marked in use. That is exactly the precondition for
+ * the failure this test has been hitting -- the third child below exits 70
+ * (EX_SOFTWARE) from the allocator reporting a double free, and the leading
+ * hypothesis is that malloc() handed the same chunk out twice, so two correct
+ * free()s free one block.
+ *
+ * Waiting for that is expensive: it has appeared 4 times in hundreds of runs.
+ * Checking the invariant directly turns a rare, non-diagnostic crash into a
+ * checkable state -- and checking it in the PARENT each iteration catches the
+ * corruption in the process that caused it, rather than in a child that merely
+ * inherited a frozen copy of it.
+ *
+ * On violation malloc_test() printf()s which invariant broke and then spins, so
+ * a hit shows up as a named message followed by a stalled cycle. */
+extern void malloc_test(void);
+
+
 static void unix_accept_connect_liveness_helper(int type)
 {
 	pid_t pid;
@@ -1750,6 +1772,13 @@ static void unix_accept_connect_liveness_helper(int type)
 		close(conn);
 
 		close(named);
+		/* The child's inherited bins, immediately before unlink() -- the only
+		 * call on this child's whole path that allocates at all (it resolves the
+		 * path through two malloc(PATH_MAX) blocks, which land in a LARGE bin).
+		 * If the copy-on-write snapshot it inherited is already inconsistent,
+		 * this names the broken invariant instead of leaving us with a bare
+		 * exit 70 one free() later. */
+		malloc_test();
 		unlink(socket_name);
 
 		exit(0);
@@ -1762,8 +1791,12 @@ static void unix_accept_connect_liveness(int type)
 	unsigned int i = 0;
 
 	for (i = 0; i < 25; ++i) {
+		/* Parent's bins, before forking again: this is where a duplicate
+		 * hand-out would originate. */
+		malloc_test();
 		unix_accept_connect_liveness_helper(type);
 	}
+	malloc_test();
 }
 
 
