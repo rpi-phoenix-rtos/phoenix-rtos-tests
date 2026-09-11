@@ -94,10 +94,12 @@ int main(int argc, char *argv[])
 		inflight[slot] = -1;
 	}
 
-	devNull = open("/dev/null", O_WRONLY);
+	devNull = (parallel > 1) ? open("/dev/null", O_WRONLY) : -1;
 
 	printf("spawn-storm: %lu launches of %s, %lu at a time%s\n", iterations, childPath, parallel,
-			(devNull >= 0) ? "" : " (no /dev/null: child output will interleave)");
+			(parallel == 1) ? " (child output kept)"
+					: ((devNull >= 0) ? " (child output muted)"
+							: " (no /dev/null: child output will interleave)"));
 
 	while (reaped < iterations) {
 		/* Fill the window before reaping, so `parallel` children really do overlap. */
@@ -127,12 +129,13 @@ int main(int argc, char *argv[])
 			}
 
 			if (pid == 0) {
-				/* Children share the tty, and with -p their writes shredded the
+				/* Under -p, children share the tty and their writes shredded the
 				 * parent's lines -- a mangled report is worse than none, since a
-				 * failure line can be lost. Their output is noise here; the exit
-				 * status is the evidence. dup2 is a bare syscall, safe between
+				 * failure line can be lost. Sequentially there is no such race, and
+				 * the child's own startup prints are the evidence for WHERE a stalled
+				 * launch stopped, so keep them. dup2 is a bare syscall, safe between
 				 * vfork and exec where stdio would not be. */
-				if (devNull >= 0) {
+				if ((parallel > 1) && (devNull >= 0)) {
 					dup2(devNull, STDOUT_FILENO);
 					dup2(devNull, STDERR_FILENO);
 				}
