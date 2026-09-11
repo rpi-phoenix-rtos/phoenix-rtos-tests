@@ -16,6 +16,14 @@
  * so a child that never returns leaves its index as the last line in the UART
  * log; no watchdog is needed to localise the hang.
  *
+ * 3063 SEQUENTIAL launches produced zero failures, which retired the idea that
+ * the fault is a per-launch lottery -- so -p runs up to N children at once.
+ * Concurrency is the variable those runs lacked: every one of them started a
+ * process on an otherwise quiet system, whereas the original failure happened
+ * while a desktop and a GPU app were live. Startup takes a blocking ioctl to
+ * the tty through a port, and this target has already had one multi-waiter
+ * wakeup bug, so contention on that path is worth a direct test.
+ *
  * Copyright 2026 Phoenix Systems
  *
  * This file is part of Phoenix-RTOS.
@@ -31,6 +39,9 @@
 #include <sys/time.h>
 
 
+#define SPAWN_MAX_PARALLEL 32u
+
+
 static unsigned long spawn_elapsedMs(const struct timeval *start, const struct timeval *end)
 {
 	return (unsigned long)(end->tv_sec - start->tv_sec) * 1000uL
@@ -41,74 +52,134 @@ static unsigned long spawn_elapsedMs(const struct timeval *start, const struct t
 int main(int argc, char *argv[])
 {
 	char *const *childArgv;
-	struct timeval before, after;
-	unsigned long iterations, i, slowest = 0, ok = 0, failed = 0;
+	char *childPath;
+	struct timeval before[SPAWN_MAX_PARALLEL], after;
+	unsigned long iterations, parallel = 1, i, launched = 0, reaped = 0;
+	unsigned long slowest = 0, ok = 0, failed = 0;
+	pid_t inflight[SPAWN_MAX_PARALLEL];
+	unsigned long slot;
 	pid_t pid;
-	int status, res;
+	int status, res, argi = 1;
 
-	if (argc < 3) {
-		fprintf(stderr, "usage: %s <iterations> <path> [args...]\n", argv[0]);
+	/* -p is optional so the sequential invocations already on record still work. */
+	if ((argc > 2) && (strcmp(argv[1], "-p") == 0)) {
+		parallel = strtoul(argv[2], NULL, 10);
+		if ((parallel == 0) || (parallel > SPAWN_MAX_PARALLEL)) {
+			fprintf(stderr, "spawn-storm: -p must be 1..%u\n", (unsigned int)SPAWN_MAX_PARALLEL);
+			return EXIT_FAILURE;
+		}
+		argi = 3;
+	}
+
+	if (argc < (argi + 2)) {
+		fprintf(stderr, "usage: %s [-p <parallel>] <iterations> <path> [args...]\n", argv[0]);
 		return EXIT_FAILURE;
 	}
 
-	iterations = strtoul(argv[1], NULL, 10);
+	iterations = strtoul(argv[argi], NULL, 10);
 	if (iterations == 0) {
 		fprintf(stderr, "spawn-storm: iterations must be non-zero\n");
 		return EXIT_FAILURE;
 	}
 
+	childPath = argv[argi + 1];
+	childArgv = &argv[argi + 1];
+
 	/* The child inherits these, so the index survives a child that wedges. */
 	setvbuf(stdout, NULL, _IONBF, 0);
 	setvbuf(stderr, NULL, _IONBF, 0);
 
-	childArgv = &argv[2];
+	for (slot = 0; slot < SPAWN_MAX_PARALLEL; slot++) {
+		inflight[slot] = -1;
+	}
 
-	printf("spawn-storm: %lu launches of %s\n", iterations, argv[2]);
+	printf("spawn-storm: %lu launches of %s, %lu at a time\n", iterations, childPath, parallel);
 
-	for (i = 0; i < iterations; i++) {
-		printf("spawn-storm: launch %lu/%lu\n", i + 1, iterations);
+	while (reaped < iterations) {
+		/* Fill the window before reaping, so `parallel` children really do overlap. */
+		while ((launched < iterations) && ((launched - reaped) < parallel)) {
+			/* The window invariant leaves a slot free, but do not bet a live pid on it. */
+			for (slot = 0; slot < parallel; slot++) {
+				if (inflight[slot] == -1) {
+					break;
+				}
+			}
+			if (slot == parallel) {
+				printf("spawn-storm: BUG no free slot with %lu in flight\n", launched - reaped);
+				break;
+			}
 
-		gettimeofday(&before, NULL);
+			printf("spawn-storm: launch %lu/%lu\n", launched + 1, iterations);
 
-		pid = vfork();
-		if (pid < 0) {
-			printf("spawn-storm: launch %lu vfork failed (%s)\n", i + 1, strerror(errno));
-			failed++;
+			gettimeofday(&before[slot], NULL);
+
+			pid = vfork();
+			if (pid < 0) {
+				printf("spawn-storm: launch %lu vfork failed (%s)\n", launched + 1, strerror(errno));
+				failed++;
+				launched++;
+				reaped++;
+				continue;
+			}
+
+			if (pid == 0) {
+				execv(childPath, childArgv);
+				_exit(EXIT_FAILURE);
+			}
+
+			inflight[slot] = pid;
+			launched++;
+		}
+
+		if (launched == reaped) {
 			continue;
 		}
 
-		if (pid == 0) {
-			execv(argv[2], childArgv);
-			_exit(EXIT_FAILURE);
-		}
-
 		do {
-			res = waitpid(pid, &status, 0);
+			res = waitpid(-1, &status, 0);
 		} while ((res < 0) && (errno == EINTR));
 
 		gettimeofday(&after, NULL);
 
 		if (res < 0) {
-			printf("spawn-storm: launch %lu waitpid failed (%s)\n", i + 1, strerror(errno));
-			failed++;
+			printf("spawn-storm: waitpid failed with %lu in flight (%s)\n",
+					launched - reaped, strerror(errno));
+			/* Nothing left to reap -- the remaining children are unaccounted for. */
+			failed += launched - reaped;
+			reaped = launched;
 			continue;
 		}
+
+		slot = SPAWN_MAX_PARALLEL;
+		for (i = 0; i < parallel; i++) {
+			if (inflight[i] == res) {
+				slot = i;
+				inflight[i] = -1;
+				break;
+			}
+		}
+
+		reaped++;
 
 		if (WIFEXITED(status) && (WEXITSTATUS(status) == 0)) {
 			ok++;
 		}
 		else {
 			failed++;
-			printf("spawn-storm: launch %lu BAD status 0x%x (exited=%d code=%d signalled=%d sig=%d)\n",
-					i + 1, (unsigned int)status, WIFEXITED(status),
+			printf("spawn-storm: pid %d BAD status 0x%x (exited=%d code=%d signalled=%d sig=%d)\n",
+					(int)res, (unsigned int)status, WIFEXITED(status),
 					WIFEXITED(status) ? WEXITSTATUS(status) : -1,
 					WIFSIGNALED(status), WIFSIGNALED(status) ? WTERMSIG(status) : -1);
 		}
 
 		/* A pre-main stall that eventually recovers shows up here, not in the counts. */
-		if (spawn_elapsedMs(&before, &after) > slowest) {
-			slowest = spawn_elapsedMs(&before, &after);
-			printf("spawn-storm: launch %lu is the new slowest at %lu ms\n", i + 1, slowest);
+		if (slot < SPAWN_MAX_PARALLEL) {
+			unsigned long ms = spawn_elapsedMs(&before[slot], &after);
+
+			if (ms > slowest) {
+				slowest = ms;
+				printf("spawn-storm: pid %d is the new slowest at %lu ms\n", (int)res, slowest);
+			}
 		}
 	}
 
