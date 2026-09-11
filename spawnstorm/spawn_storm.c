@@ -37,6 +37,7 @@
 #include <errno.h>
 #include <sys/wait.h>
 #include <sys/time.h>
+#include <fcntl.h>
 
 
 #define SPAWN_MAX_PARALLEL 32u
@@ -59,7 +60,7 @@ int main(int argc, char *argv[])
 	pid_t inflight[SPAWN_MAX_PARALLEL];
 	unsigned long slot;
 	pid_t pid;
-	int status, res, argi = 1;
+	int status, res, devNull, argi = 1;
 
 	/* -p is optional so the sequential invocations already on record still work. */
 	if ((argc > 2) && (strcmp(argv[1], "-p") == 0)) {
@@ -93,7 +94,10 @@ int main(int argc, char *argv[])
 		inflight[slot] = -1;
 	}
 
-	printf("spawn-storm: %lu launches of %s, %lu at a time\n", iterations, childPath, parallel);
+	devNull = open("/dev/null", O_WRONLY);
+
+	printf("spawn-storm: %lu launches of %s, %lu at a time%s\n", iterations, childPath, parallel,
+			(devNull >= 0) ? "" : " (no /dev/null: child output will interleave)");
 
 	while (reaped < iterations) {
 		/* Fill the window before reaping, so `parallel` children really do overlap. */
@@ -123,6 +127,15 @@ int main(int argc, char *argv[])
 			}
 
 			if (pid == 0) {
+				/* Children share the tty, and with -p their writes shredded the
+				 * parent's lines -- a mangled report is worse than none, since a
+				 * failure line can be lost. Their output is noise here; the exit
+				 * status is the evidence. dup2 is a bare syscall, safe between
+				 * vfork and exec where stdio would not be. */
+				if (devNull >= 0) {
+					dup2(devNull, STDOUT_FILENO);
+					dup2(devNull, STDERR_FILENO);
+				}
 				execv(childPath, childArgv);
 				_exit(EXIT_FAILURE);
 			}
@@ -172,6 +185,12 @@ int main(int argc, char *argv[])
 					WIFSIGNALED(status), WIFSIGNALED(status) ? WTERMSIG(status) : -1);
 		}
 
+		/* A harness cutoff is the normal way these runs end, and the DONE line
+		 * only prints if every launch completed -- so bank a tally as we go. */
+		if ((reaped % 100uL) == 0uL) {
+			printf("spawn-storm: PROGRESS %lu reaped, %lu ok, %lu failed\n", reaped, ok, failed);
+		}
+
 		/* A pre-main stall that eventually recovers shows up here, not in the counts. */
 		if (slot < SPAWN_MAX_PARALLEL) {
 			unsigned long ms = spawn_elapsedMs(&before[slot], &after);
@@ -181,6 +200,10 @@ int main(int argc, char *argv[])
 				printf("spawn-storm: pid %d is the new slowest at %lu ms\n", (int)res, slowest);
 			}
 		}
+	}
+
+	if (devNull >= 0) {
+		close(devNull);
 	}
 
 	printf("spawn-storm: DONE %lu ok, %lu failed, slowest %lu ms\n", ok, failed, slowest);
