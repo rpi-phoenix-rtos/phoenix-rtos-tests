@@ -240,10 +240,168 @@ TEST(test_inet_socket, getaddrinfo_numeric_and_passive)
 }
 
 
+/* socket() is the one inet call with NO coverage, and it is also the one that
+ * changed: the kernel used to resolve /dev/netsocket by PATH on every call, which
+ * deadlocked any process that was itself the filesystem owning "/" (see
+ * phoenix-rtos-kernel posix/inet.c). It now resolves once and caches. These cases
+ * exercise what that cache can get wrong: the second and later calls, a mix of
+ * families and types through the same cached port, and a FAILED call in between --
+ * which must not poison the cache for the next good one. */
+#define SOCKET_BURST 64
+
+
+TEST(test_inet_socket, socket_many_sequential)
+{
+	int fd[SOCKET_BURST];
+	int i, j;
+
+	for (i = 0; i < SOCKET_BURST; i++) {
+		fd[i] = socket(AF_INET, SOCK_DGRAM, 0);
+		if (fd[i] < 0) {
+			/* Close what we did get, so a failure here does not leak into the
+			 * rest of the group as EMFILE. */
+			for (j = 0; j < i; j++) {
+				close(fd[j]);
+			}
+			FAIL("socket");
+		}
+	}
+
+	/* Distinct descriptors: a cache that handed back one shared object would
+	 * still return a valid fd, so "it worked" is not enough. */
+	for (i = 0; i < SOCKET_BURST; i++) {
+		for (j = i + 1; j < SOCKET_BURST; j++) {
+			TEST_ASSERT_NOT_EQUAL_INT(fd[i], fd[j]);
+		}
+	}
+
+	for (i = 0; i < SOCKET_BURST; i++) {
+		TEST_ASSERT_EQUAL_INT(0, close(fd[i]));
+	}
+}
+
+
+TEST(test_inet_socket, socket_mixed_family_and_type)
+{
+	int dgram, stream, v6;
+
+	dgram = socket(AF_INET, SOCK_DGRAM, 0);
+	TEST_ASSERT_TRUE(dgram >= 0);
+
+	stream = socket(AF_INET, SOCK_STREAM, 0);
+	TEST_ASSERT_TRUE(stream >= 0);
+	TEST_ASSERT_NOT_EQUAL_INT(dgram, stream);
+
+	/* AF_INET6 may legitimately be unsupported; what must not happen is a
+	 * crash or a success that hands back a v4 socket. */
+	v6 = socket(AF_INET6, SOCK_DGRAM, 0);
+	if (v6 >= 0) {
+		TEST_ASSERT_NOT_EQUAL_INT(dgram, v6);
+		TEST_ASSERT_NOT_EQUAL_INT(stream, v6);
+		TEST_ASSERT_EQUAL_INT(0, close(v6));
+	}
+	else {
+		TEST_ASSERT_TRUE((errno == EAFNOSUPPORT) || (errno == EPROTONOSUPPORT) ||
+			(errno == EINVAL));
+	}
+
+	TEST_ASSERT_EQUAL_INT(0, close(stream));
+	TEST_ASSERT_EQUAL_INT(0, close(dgram));
+}
+
+
+TEST(test_inet_socket, socket_bad_args_do_not_poison)
+{
+	int bad, good;
+
+	bad = socket(AF_INET, 0x7ffe, 0);
+	TEST_ASSERT_EQUAL_INT(-1, bad);
+	/* ESOCKTNOSUPPORT is not defined by libphoenix, so it is not listed. */
+	TEST_ASSERT_TRUE((errno == EINVAL) || (errno == EPROTONOSUPPORT) ||
+		(errno == EAFNOSUPPORT));
+
+	/* The call after the failure is the point of this case. */
+	good = socket(AF_INET, SOCK_DGRAM, 0);
+	TEST_ASSERT_TRUE(good >= 0);
+	TEST_ASSERT_EQUAL_INT(0, close(good));
+}
+
+
+TEST(test_inet_socket, bind_ephemeral_reports_a_port)
+{
+	int fd;
+	struct sockaddr_in addr = { 0 };
+	struct sockaddr_in got = { 0 };
+	socklen_t len = sizeof(got);
+
+	fd = socket(AF_INET, SOCK_DGRAM, 0);
+	TEST_ASSERT_TRUE(fd >= 0);
+
+	addr.sin_family = AF_INET;
+	addr.sin_port = 0; /* let the stack choose */
+	addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+	TEST_ASSERT_EQUAL_INT(0, bind(fd, (struct sockaddr *)&addr, sizeof(addr)));
+
+	TEST_ASSERT_EQUAL_INT(0, getsockname(fd, (struct sockaddr *)&got, &len));
+	TEST_ASSERT_EQUAL_INT(AF_INET, got.sin_family);
+	/* A bound socket with port 0 would be unreachable -- the whole point of
+	 * asking for an ephemeral port is that one gets assigned. */
+	TEST_ASSERT_NOT_EQUAL_INT(0, ntohs(got.sin_port));
+
+	TEST_ASSERT_EQUAL_INT(0, close(fd));
+}
+
+
+TEST(test_inet_socket, udp_loopback_roundtrip)
+{
+	static const char payload[] = "phoenix-inet-roundtrip";
+	int tx, rx;
+	struct sockaddr_in rxaddr = { 0 };
+	struct sockaddr_in bound = { 0 };
+	struct sockaddr_in from = { 0 };
+	socklen_t len;
+	char buf[sizeof(payload)];
+	ssize_t n;
+
+	rx = socket(AF_INET, SOCK_DGRAM, 0);
+	TEST_ASSERT_TRUE(rx >= 0);
+	tx = socket(AF_INET, SOCK_DGRAM, 0);
+	TEST_ASSERT_TRUE(tx >= 0);
+
+	rxaddr.sin_family = AF_INET;
+	rxaddr.sin_port = 0;
+	rxaddr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+	TEST_ASSERT_EQUAL_INT(0, bind(rx, (struct sockaddr *)&rxaddr, sizeof(rxaddr)));
+
+	len = sizeof(bound);
+	TEST_ASSERT_EQUAL_INT(0, getsockname(rx, (struct sockaddr *)&bound, &len));
+
+	n = sendto(tx, payload, sizeof(payload), 0, (struct sockaddr *)&bound, sizeof(bound));
+	TEST_ASSERT_EQUAL_INT((ssize_t)sizeof(payload), n);
+
+	len = sizeof(from);
+	n = recvfrom(rx, buf, sizeof(buf), 0, (struct sockaddr *)&from, &len);
+	TEST_ASSERT_EQUAL_INT((ssize_t)sizeof(payload), n);
+	TEST_ASSERT_EQUAL_MEMORY(payload, buf, sizeof(payload));
+	/* The datagram must come back attributed to loopback, not to whatever was
+	 * left in the caller's buffer. */
+	TEST_ASSERT_EQUAL_INT(AF_INET, from.sin_family);
+	TEST_ASSERT_EQUAL_UINT32(htonl(INADDR_LOOPBACK), from.sin_addr.s_addr);
+
+	TEST_ASSERT_EQUAL_INT(0, close(tx));
+	TEST_ASSERT_EQUAL_INT(0, close(rx));
+}
+
+
 TEST_GROUP_RUNNER(test_inet_socket)
 {
 	RUN_TEST_CASE(test_inet_socket, inet_zero_len_send);
 	RUN_TEST_CASE(test_inet_socket, getaddrinfo_numeric_and_passive);
+	RUN_TEST_CASE(test_inet_socket, socket_many_sequential);
+	RUN_TEST_CASE(test_inet_socket, socket_mixed_family_and_type);
+	RUN_TEST_CASE(test_inet_socket, socket_bad_args_do_not_poison);
+	RUN_TEST_CASE(test_inet_socket, bind_ephemeral_reports_a_port);
+	RUN_TEST_CASE(test_inet_socket, udp_loopback_roundtrip);
 }
 
 void runner(void)
