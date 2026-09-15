@@ -249,31 +249,74 @@ static void heap_canary_init(void)
 }
 
 
-static void heap_canary_verify(const char *where)
+/* Returns 0 when the canary is intact, 1 when it is damaged, and describes the
+ * damage on stderr.
+ *
+ * It scans the WHOLE buffer rather than stopping at the first mismatch. The one
+ * field capture (2026-09-15) reported `run=187`, which reads like a 187-byte
+ * run and is not: the pattern 0xa5^(i*31) is itself 0x00 at exactly i=187, so
+ * the comparison stopped there while the damage continued. Whether the damaged
+ * span is ONE PAGE and PAGE-ALIGNED is the whole question -- that is what makes
+ * it a COW fault installing a fresh zero page rather than a stray write -- so
+ * report the true extent, and how much of it is zeros.
+ *
+ * Raw write(2) only: stdio and malloc are both suspects on this path. */
+static int heap_canary_check(const char *where)
 {
-	char msg[224];
-	size_t i, run;
+	char msg[352];
+	size_t i, first, last, bad, zeros;
+	uintptr_t base, dmgStart, dmgEnd;
 	int n;
 
 	if (heap_canary == NULL) {
-		return;
+		return 0;
 	}
 
+	first = HEAP_CANARY_SZ;
+	last = 0;
+	bad = 0;
+	zeros = 0;
 	for (i = 0; i < HEAP_CANARY_SZ; i++) {
 		if (heap_canary[i] == HEAP_CANARY_AT(i)) {
 			continue;
 		}
-		/* Report the run length and whether it is zeros: a zeroed PAGE is the
-		 * COW signature, a single flipped byte is something else entirely. */
-		for (run = 0; ((i + run) < HEAP_CANARY_SZ) && (heap_canary[i + run] != HEAP_CANARY_AT(i + run)); run++) {
+		if (first == HEAP_CANARY_SZ) {
+			first = i;
 		}
-		n = snprintf(msg, sizeof(msg),
-			"HEAP-CANARY at %s: off=%zu (page off %zu) got=0x%02x want=0x%02x run=%zu zeros=%d base=%p\n",
-			where, i, i % 4096u, heap_canary[i], HEAP_CANARY_AT(i), run,
-			(heap_canary[i] == 0) ? 1 : 0, (void *)heap_canary);
-		if (n > 0) {
-			(void)write(2, msg, (size_t)n);
+		last = i;
+		bad++;
+		if (heap_canary[i] == 0) {
+			zeros++;
 		}
+	}
+
+	if (bad == 0) {
+		return 0;
+	}
+
+	base = (uintptr_t)heap_canary;
+	dmgStart = base + first;
+	dmgEnd = base + last + 1u;
+	n = snprintf(msg, sizeof(msg),
+		"HEAP-CANARY at %s: base=%p size=%u\n"
+		"  damaged [%p,%p) span=%zu bad=%zu zeros=%zu (%s)\n"
+		"  start%s page-aligned, end%s page-aligned, span%s exactly one page\n",
+		where, (void *)heap_canary, (unsigned)HEAP_CANARY_SZ,
+		(void *)dmgStart, (void *)dmgEnd, (size_t)(dmgEnd - dmgStart), bad, zeros,
+		(zeros == bad) ? "ALL ZEROS" : "not all zeros",
+		((dmgStart & 0xfffu) == 0u) ? " IS" : " is NOT",
+		((dmgEnd & 0xfffu) == 0u) ? " IS" : " is NOT",
+		((dmgEnd - dmgStart) == 4096u) ? " IS" : " is NOT");
+	if (n > 0) {
+		(void)write(2, msg, (size_t)n);
+	}
+	return 1;
+}
+
+
+static void heap_canary_verify(const char *where)
+{
+	if (heap_canary_check(where) != 0) {
 		_exit(96);
 	}
 }
@@ -1009,6 +1052,28 @@ static void unix_transfer(int type)
 
 		if (waitpid(pid, &status, 0) < 0)
 			FAIL("waitpid");
+
+		/* THE discriminator, and the reason the parent checks at all.
+		 *
+		 * The canary block is inherited copy-on-write. If the child died on it
+		 * (exit 96) the next question is whether the PARENT's copy survived:
+		 *   parent intact + child damaged -> the COW break handed the child a
+		 *     fresh ZERO page instead of a copy of ours: a kernel COW bug;
+		 *   both damaged               -> the damage predates the fork, so the
+		 *     parent's own write was lost and COW is innocent.
+		 * One field capture (2026-09-15) could not tell these apart. */
+		if (WIFEXITED(status) && (WEXITSTATUS(status) == 96)) {
+			if (heap_canary_check("parent-after-child-canary-failed") == 0) {
+				(void)write(2,
+					"HEAP-CANARY: parent copy INTACT while the child's was damaged"
+					" -> COW handed the child a zero page\n", 98);
+			}
+			else {
+				(void)write(2,
+					"HEAP-CANARY: parent copy ALSO damaged -> the loss predates the"
+					" fork; COW is not implicated\n", 91);
+			}
+		}
 
 		TEST_ASSERT(WIFEXITED(status));
 		TEST_ASSERT(WEXITSTATUS(status) == 0);
