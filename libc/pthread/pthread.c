@@ -22,6 +22,7 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <time.h>
+#include <sys/threads.h>
 
 #include "unity_fixture.h"
 #include "pthread_cond_test_functions.h"
@@ -714,6 +715,100 @@ TEST(test_pthread_newlocks, spin_mutual_exclusion)
 }
 
 
+static pthread_mutex_t g_newlocks_mutex;
+static handle_t g_newlocks_phxmutex;
+
+
+static void *mutex_incrementer(void *arg)
+{
+	unsigned int iters = *(unsigned int *)arg;
+	unsigned int i;
+
+	for (i = 0; i < iters; ++i) {
+		pthread_mutex_lock(&g_newlocks_mutex);
+		/* Same non-atomic read-modify-write as the spinlock test above: a
+		 * working mutex serializes it, a broken one drops increments. */
+		unsigned long v = g_newlocks_counter;
+		g_newlocks_counter = v + 1;
+		pthread_mutex_unlock(&g_newlocks_mutex);
+	}
+	return NULL;
+}
+
+
+/* Does a pthread mutex actually exclude across CORES?
+ *
+ * Asked for a concrete reason (2026-09-17): libphoenix's allocator protects the
+ * whole heap with ONE lock, and heap-corruption guards fired in two heavily
+ * multithreaded apps while the same allocator survived 3.2M concurrent
+ * operations on the host with a real pthread mutex under it. If Phoenix's mutex
+ * did not exclude under 4-core SMP, that difference would be explained -- and
+ * nothing here tested it: the suite had a mutual-exclusion test for SPINLOCKS
+ * only. The iteration count is deliberately high so the threads overlap for a
+ * long time rather than finishing one after another.
+ */
+TEST(test_pthread_newlocks, mutex_mutual_exclusion)
+{
+	enum { NTH = 4, ITERS = 20000 };
+	pthread_t th[NTH];
+	unsigned int iters = ITERS;
+	int i;
+
+	g_newlocks_counter = 0;
+	TEST_ASSERT_EQUAL_INT(0, pthread_mutex_init(&g_newlocks_mutex, NULL));
+
+	for (i = 0; i < NTH; ++i) {
+		TEST_ASSERT_EQUAL_INT(0, spawn_with_stack(&th[i], mutex_incrementer, &iters));
+	}
+	for (i = 0; i < NTH; ++i) {
+		TEST_ASSERT_EQUAL_INT(0, pthread_join(th[i], NULL));
+	}
+
+	TEST_ASSERT_EQUAL_UINT(NTH * ITERS, g_newlocks_counter);
+	TEST_ASSERT_EQUAL_INT(0, pthread_mutex_destroy(&g_newlocks_mutex));
+}
+
+
+static void *phxmutex_incrementer(void *arg)
+{
+	unsigned int iters = *(unsigned int *)arg;
+	unsigned int i;
+
+	for (i = 0; i < iters; ++i) {
+		mutexLock(g_newlocks_phxmutex);
+		unsigned long v = g_newlocks_counter;
+		g_newlocks_counter = v + 1;
+		mutexUnlock(g_newlocks_phxmutex);
+	}
+	return NULL;
+}
+
+
+/* ...and the same question for the RAW kernel mutex (sys/threads.h), which is
+ * the primitive libphoenix's malloc actually uses -- pthread_mutex_t is a layer
+ * above it, so a pass there does not settle this one. */
+TEST(test_pthread_newlocks, phoenix_mutex_mutual_exclusion)
+{
+	enum { NTH = 4, ITERS = 20000 };
+	pthread_t th[NTH];
+	unsigned int iters = ITERS;
+	int i;
+
+	g_newlocks_counter = 0;
+	TEST_ASSERT_EQUAL_INT(0, mutexCreate(&g_newlocks_phxmutex));
+
+	for (i = 0; i < NTH; ++i) {
+		TEST_ASSERT_EQUAL_INT(0, spawn_with_stack(&th[i], phxmutex_incrementer, &iters));
+	}
+	for (i = 0; i < NTH; ++i) {
+		TEST_ASSERT_EQUAL_INT(0, pthread_join(th[i], NULL));
+	}
+
+	TEST_ASSERT_EQUAL_UINT(NTH * ITERS, g_newlocks_counter);
+	TEST_ASSERT_EQUAL_INT(0, resourceDestroy(g_newlocks_phxmutex));
+}
+
+
 TEST(test_pthread_newlocks, mutex_recursive)
 {
 	pthread_mutexattr_t attr;
@@ -825,6 +920,8 @@ TEST_GROUP_RUNNER(test_pthread_newlocks)
 {
 	RUN_TEST_CASE(test_pthread_newlocks, spin_lock_trylock_unlock);
 	RUN_TEST_CASE(test_pthread_newlocks, spin_mutual_exclusion);
+	RUN_TEST_CASE(test_pthread_newlocks, mutex_mutual_exclusion);
+	RUN_TEST_CASE(test_pthread_newlocks, phoenix_mutex_mutual_exclusion);
 	RUN_TEST_CASE(test_pthread_newlocks, mutex_recursive);
 	RUN_TEST_CASE(test_pthread_newlocks, mutex_errorcheck_relock_edeadlk);
 	RUN_TEST_CASE(test_pthread_newlocks, mutexattr_roundtrip);
