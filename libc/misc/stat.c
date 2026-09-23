@@ -581,12 +581,14 @@ TEST(stat_mode, sock_type)
  *   fd valid, fstat OK, by-name ENOENT -> the inode is fine and the NAME is gone
  *   fd valid, both fail (ESTALE)       -> the inode itself went away server-side
  */
-static const char *stat_whySetupFailed(void)
+/* Takes the errno saved immediately after the open, rather than reading the live
+ * one: snprintf() is free to clobber errno before the format gets to read it. */
+static const char *stat_whySetupFailed(int savedErrno)
 {
 	static char msg[128];
 
 	(void)snprintf(msg, sizeof(msg),
-		"TEST_SETUP: open(\"%s\", O_CREAT, 0666) = %d, errno = %d", path, fd, errno);
+		"TEST_SETUP: open(\"%s\", O_CREAT, 0666) = %d, errno = %d", path, fd, savedErrno);
 
 	return msg;
 }
@@ -627,7 +629,7 @@ TEST_SETUP(stat_nlink_size_blk_tim)
 	errno = 0;
 	fd = open(path, O_CREAT, 0666);
 	if (fd < 0) {
-		TEST_FAIL_MESSAGE(stat_whySetupFailed());
+		TEST_FAIL_MESSAGE(stat_whySetupFailed(errno));
 	}
 }
 
