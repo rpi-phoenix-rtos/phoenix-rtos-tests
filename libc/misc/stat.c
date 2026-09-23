@@ -566,6 +566,53 @@ TEST(stat_mode, sock_type)
 }
 
 
+/* ★ 2026-09-23: three consecutive cases in this group failed at their FIRST
+ * resolution of `path` by name (stat/truncate/lstat, all "Expected 0 Was -1"),
+ * and the group then recovered by st_dev_ino. One firing in 90 archived runs of
+ * the group, all but one of them on the netboot NFS root.
+ *
+ * It was unattributable because nothing checked the open() in TEST_SETUP that is
+ * supposed to have created the file: a setup that silently failed to create it
+ * and a name that resolves to a dead inode produce the identical message, three
+ * lines into an unrelated case. These two helpers split them. Read the next
+ * firing as:
+ *
+ *   setup fd < 0                       -> the create failed; its errno is the lead
+ *   fd valid, fstat OK, by-name ENOENT -> the inode is fine and the NAME is gone
+ *   fd valid, both fail (ESTALE)       -> the inode itself went away server-side
+ */
+static const char *stat_whySetupFailed(void)
+{
+	static char msg[128];
+
+	(void)snprintf(msg, sizeof(msg),
+		"TEST_SETUP: open(\"%s\", O_CREAT, 0666) = %d, errno = %d", path, fd, errno);
+
+	return msg;
+}
+
+
+/* Call with the result of the FIRST operation that resolves `path` by name, and
+ * the errno saved immediately after it. Cheap enough to sit on the failure path
+ * only, so the passing run is unchanged. */
+static const char *stat_whyNameFailed(int rc, int savedErrno)
+{
+	static char msg[192];
+	struct stat sb;
+	int frc, fe;
+
+	errno = 0;
+	frc = fstat(fd, &sb);
+	fe = errno;
+
+	(void)snprintf(msg, sizeof(msg),
+		"by-name rc = %d, errno = %d; setup fd = %d; fstat(fd) rc = %d, errno = %d",
+		rc, savedErrno, fd, frc, fe);
+
+	return msg;
+}
+
+
 TEST_SETUP(stat_nlink_size_blk_tim)
 {
 	/* Start from a known link count. This group hard-links `path` to symPath,
@@ -577,7 +624,11 @@ TEST_SETUP(stat_nlink_size_blk_tim)
 	remove(tempPath);
 	remove("test_stat_another_link_path");
 	remove(path);
+	errno = 0;
 	fd = open(path, O_CREAT, 0666);
+	if (fd < 0) {
+		TEST_FAIL_MESSAGE(stat_whySetupFailed());
+	}
 }
 
 
@@ -723,9 +774,17 @@ TEST(stat_nlink_size_blk_tim, size_blk_blocks)
 TEST(stat_nlink_size_blk_tim, size_blk_blocks_zero)
 {
 	struct stat buffer;
+	int rc, e;
+
+	/* First resolution of `path` by name in this case -- see stat_whyNameFailed. */
+	errno = 0;
+	rc = stat(path, &buffer);
+	e = errno;
+	if (rc != 0) {
+		TEST_FAIL_MESSAGE(stat_whyNameFailed(rc, e));
+	}
 
 	/* block size may differ from the target */
-	TEST_ASSERT_EQUAL_INT(0, stat(path, &buffer));
 	TEST_ASSERT_EQUAL_INT(0, buffer.st_size);
 	TEST_ASSERT_GREATER_THAN_INT(0, buffer.st_blksize);
 	TEST_ASSERT_EQUAL_INT(0, buffer.st_blocks);
@@ -746,8 +805,15 @@ TEST(stat_nlink_size_blk_tim, size_blk_blocks_big)
 {
 	struct stat buffer;
 	off_t newSize = INT_MAX / 2;
+	int rc, e;
 
-	TEST_ASSERT_EQUAL_INT(0, truncate(path, newSize));
+	/* First resolution of `path` by name in this case -- see stat_whyNameFailed. */
+	errno = 0;
+	rc = truncate(path, newSize);
+	e = errno;
+	if (rc != 0) {
+		TEST_FAIL_MESSAGE(stat_whyNameFailed(rc, e));
+	}
 
 	/* block size may differ from the target */
 	TEST_ASSERT_EQUAL_INT(0, stat(path, &buffer));
@@ -770,12 +836,20 @@ TEST(stat_nlink_size_blk_tim, size_blk_blocks_big)
 TEST(stat_nlink_size_blk_tim, size_symlink_lstat)
 {
 	struct stat buffer;
+	int rc, e;
 
 	unlink(symPath);
 
 	TEST_ASSERT_EQUAL_INT(0, symlink(path, symPath));
 
-	TEST_ASSERT_EQUAL_INT(0, lstat(path, &buffer));
+	/* First resolution of `path` by name in this case: symlink() above only
+	 * stores the string, it does not resolve it. See stat_whyNameFailed. */
+	errno = 0;
+	rc = lstat(path, &buffer);
+	e = errno;
+	if (rc != 0) {
+		TEST_FAIL_MESSAGE(stat_whyNameFailed(rc, e));
+	}
 	TEST_ASSERT_EQUAL_INT(0, buffer.st_size);
 
 	TEST_ASSERT_EQUAL_INT(0, lstat(symPath, &buffer));
