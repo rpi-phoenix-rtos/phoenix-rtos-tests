@@ -415,6 +415,55 @@ TEST(stdlib_strto, strtol_min_max)
 }
 
 
+TEST(stdlib_strto, strtol_overflow_endptr)
+{
+	/* C17 7.22.1.4: the subject sequence is the LONGEST initial subsequence of
+	 * the expected form. Overflow does not shorten it -- the value saturates and
+	 * errno is ERANGE, but *endptr must still point PAST the digits. Storing
+	 * nptr there instead means "no conversion performed", which is a different
+	 * and wrong answer. Every existing min/max case passes NULL for endptr, so
+	 * this path had no coverage. */
+	char *end;
+	const char *over = "9223372036854775808";  /* LONG_MAX + 1 */
+	const char *under = "-9223372036854775809"; /* LONG_MIN - 1 */
+	const char *uover = "18446744073709551616"; /* ULONG_MAX + 1 */
+	const char *list = "99999999999999999999 7";
+	long v;
+	unsigned long uv;
+
+	errno = 0;
+	end = NULL;
+	TEST_ASSERT_EQUAL_INT(LONG_MAX, strtol(over, &end, 10));
+	TEST_ASSERT_EQUAL_INT(ERANGE, errno);
+	TEST_ASSERT_NOT_NULL(end);
+	TEST_ASSERT_EQUAL_INT((int)strlen(over), (int)(end - over));
+
+	errno = 0;
+	end = NULL;
+	TEST_ASSERT_EQUAL_INT(LONG_MIN, strtol(under, &end, 10));
+	TEST_ASSERT_EQUAL_INT(ERANGE, errno);
+	TEST_ASSERT_EQUAL_INT((int)strlen(under), (int)(end - under));
+
+	errno = 0;
+	end = NULL;
+	TEST_ASSERT_EQUAL_UINT64(ULONG_MAX, strtoul(uover, &end, 10));
+	TEST_ASSERT_EQUAL_INT(ERANGE, errno);
+	TEST_ASSERT_EQUAL_INT((int)strlen(uover), (int)(end - uover));
+
+	/* Why it matters: walking a list of numbers with endptr must still advance
+	 * past an out-of-range one, or the caller stalls on it forever. */
+	errno = 0;
+	end = NULL;
+	v = strtol(list, &end, 10);
+	TEST_ASSERT_EQUAL_INT(LONG_MAX, v);
+	TEST_ASSERT_EQUAL_INT(ERANGE, errno);
+	errno = 0;
+	uv = (unsigned long)strtol(end, &end, 10);
+	TEST_ASSERT_EQUAL_UINT64(7, uv);
+	TEST_ASSERT_EQUAL_INT((int)strlen(list), (int)(end - list));
+}
+
+
 TEST(stdlib_strto, strtoll_basic)
 {
 	char *end;
@@ -1188,6 +1237,7 @@ TEST_GROUP_RUNNER(stdlib_strto)
 	RUN_TEST_CASE(stdlib_strto, strtol_other_bases);
 	RUN_TEST_CASE(stdlib_strto, strtol_other_bases_neg_values);
 	RUN_TEST_CASE(stdlib_strto, strtol_min_max);
+	RUN_TEST_CASE(stdlib_strto, strtol_overflow_endptr);
 
 	RUN_TEST_CASE(stdlib_strto, strtoll_basic);
 	RUN_TEST_CASE(stdlib_strto, strtoll_basic_binary);
