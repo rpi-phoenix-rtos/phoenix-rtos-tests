@@ -415,6 +415,39 @@ TEST(stdlib_strto, strtol_min_max)
 }
 
 
+TEST(stdlib_strto, strtod_subnormal_many_digits)
+{
+	/* A subnormal written with enough significant digits used to parse as 0.0.
+	 * The underflow guard rejected the number from its exponent alone, allowing
+	 * for the mantissa's digits but not for the subnormal range, which reaches
+	 * far below DBL_MIN_10_EXP (the smallest NORMAL exponent). So the SAME value
+	 * parsed correctly with few digits and vanished with many -- and the 17-digit
+	 * form that "%.17g" produces always vanished, which is exactly the form any
+	 * value round-tripped through printf takes. */
+	const double tiny = nextafter(0.0, 1.0); /* DBL_TRUE_MIN, 0x1p-1074 */
+	char buf[64];
+	double back;
+
+	TEST_ASSERT_TRUE(tiny > 0.0);
+
+	/* few digits: worked before, must keep working */
+	TEST_ASSERT_TRUE(strtod("4.94e-324", NULL) > 0.0);
+
+	/* more digits, same magnitude: this is what regressed */
+	TEST_ASSERT_TRUE(strtod("4.9407e-324", NULL) > 0.0);
+	TEST_ASSERT_TRUE(strtod("4.9406564584124654e-324", NULL) > 0.0);
+	TEST_ASSERT_TRUE(strtod("1.0000000000000000e-320", NULL) > 0.0);
+
+	/* printf round-trip must be exact, bit for bit */
+	sprintf(buf, "%.17g", tiny);
+	back = strtod(buf, NULL);
+	TEST_ASSERT_EQUAL_MEMORY(&tiny, &back, sizeof(double));
+
+	/* a value genuinely below anything representable must still be zero */
+	TEST_ASSERT_EQUAL_DOUBLE(0.0, strtod("1e-400", NULL));
+}
+
+
 TEST(stdlib_strto, strtol_overflow_endptr)
 {
 	/* C17 7.22.1.4: the subject sequence is the LONGEST initial subsequence of
@@ -1237,6 +1270,7 @@ TEST_GROUP_RUNNER(stdlib_strto)
 	RUN_TEST_CASE(stdlib_strto, strtol_other_bases);
 	RUN_TEST_CASE(stdlib_strto, strtol_other_bases_neg_values);
 	RUN_TEST_CASE(stdlib_strto, strtol_min_max);
+	RUN_TEST_CASE(stdlib_strto, strtod_subnormal_many_digits);
 	RUN_TEST_CASE(stdlib_strto, strtol_overflow_endptr);
 
 	RUN_TEST_CASE(stdlib_strto, strtoll_basic);
