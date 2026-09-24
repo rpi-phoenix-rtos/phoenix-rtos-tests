@@ -36,6 +36,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <wchar.h>
 #include <unity_fixture.h>
 #include <signal.h>
 
@@ -206,6 +207,7 @@ TEST_GROUP(stdio_printf_u);
 TEST_GROUP(stdio_printf_x);
 TEST_GROUP(stdio_printf_fega);
 TEST_GROUP(stdio_printf_cspn);
+TEST_GROUP(stdio_printf_wide);
 TEST_GROUP(stdio_printf_rest);
 
 
@@ -2424,6 +2426,81 @@ TEST_GROUP_RUNNER(stdio_printf_fega)
 }
 
 
+
+/* Wide conversions, written to the C standard rather than to a particular
+ * locale's repertoire.
+ *
+ * The pre-existing ls/S/C cases above stay ignored on Phoenix: they expect
+ * L"\4399\0ns" to render as "#99", which needs a locale whose wcrtomb() can
+ * represent U+011B. Phoenix's C locale maps 1:1 onto bytes and returns EILSEQ
+ * above 0xff, so a conforming implementation cannot produce that string. These
+ * cases cover the behaviour that IS defined: the ASCII repertoire, field width,
+ * precision as a BYTE count, and the legacy %S/%C spellings.
+ *
+ * Deliberately NOT tested: a NULL argument to %ls. glibc prints "(null)", but the
+ * standard makes it undefined, and gcc rejects the call outright
+ * (-Werror=format-overflow, "'%ls' directive argument is null"), so the test could
+ * not even be compiled. format.c still guards it to match the narrow %s path
+ * rather than fault -- that guard is defensive, not a contract.
+ */
+TEST_SETUP(stdio_printf_wide)
+{
+	test_outFile = fopen(PATH, "w+");
+}
+
+
+TEST_TEAR_DOWN(stdio_printf_wide)
+{
+	fclose(test_outFile);
+	remove(PATH);
+}
+
+
+TEST(stdio_printf_wide, ls_basic)
+{
+	test_assertPrintfs("Lorem", "%ls", L"Lorem");
+	test_assertVprintfs("Lorem", "%ls", L"Lorem");
+	/* embedded NUL terminates, exactly as for %s */
+	test_assertPrintfs("hello", "%ls", L"hello\0\0world");
+	test_assertPrintfs("", "%ls", L"");
+}
+
+
+TEST(stdio_printf_wide, ls_width_precision)
+{
+	test_assertPrintfs("     Lorem", "%10ls", L"Lorem");
+	test_assertPrintfs("Lorem     ", "%-10ls", L"Lorem");
+	/* precision counts bytes of converted output */
+	test_assertPrintfs("Lor", "%.3ls", L"Lorem");
+	test_assertPrintfs("       Lor", "%10.3ls", L"Lorem");
+}
+
+
+TEST(stdio_printf_wide, S_is_ls)
+{
+	test_assertPrintfs("Lorem", "%S", L"Lorem");
+	test_assertPrintfs("     Lorem", "%10S", L"Lorem");
+}
+
+
+TEST(stdio_printf_wide, lc_and_C)
+{
+	test_assertPrintfs("A", "%lc", (wint_t)L'A');
+	test_assertPrintfs("A", "%C", (wint_t)L'A');
+	test_assertPrintfs("    A", "%5lc", (wint_t)L'A');
+	test_assertPrintfs("A    ", "%-5lc", (wint_t)L'A');
+}
+
+
+TEST_GROUP_RUNNER(stdio_printf_wide)
+{
+	RUN_TEST_CASE(stdio_printf_wide, ls_basic);
+	RUN_TEST_CASE(stdio_printf_wide, ls_width_precision);
+	RUN_TEST_CASE(stdio_printf_wide, S_is_ls);
+	RUN_TEST_CASE(stdio_printf_wide, lc_and_C);
+}
+
+
 TEST_GROUP_RUNNER(stdio_printf_cspn)
 {
 	RUN_TEST_CASE(stdio_printf_cspn, c);
@@ -2476,6 +2553,7 @@ void runner(void)
 	RUN_TEST_GROUP(stdio_printf_x);
 	RUN_TEST_GROUP(stdio_printf_fega);
 	RUN_TEST_GROUP(stdio_printf_cspn);
+	RUN_TEST_GROUP(stdio_printf_wide);
 	RUN_TEST_GROUP(stdio_printf_rest);
 	RUN_TEST_GROUP(stdio_printf_sizing);
 	RUN_TEST_GROUP(wide_printf);
