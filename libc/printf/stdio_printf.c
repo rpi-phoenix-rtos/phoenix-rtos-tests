@@ -2386,8 +2386,32 @@ TEST_GROUP_RUNNER(stdio_printf_x)
 }
 
 
+TEST(stdio_printf_fega, rounding_ties_to_even)
+{
+	/* IEEE-754 default rounding is round-to-nearest, TIES TO EVEN -- what C's
+	 * "correctly rounded" recommended practice asks for and what glibc and musl
+	 * do. The decimal form used to round every tie away from zero, so "%.0f" of
+	 * 0.5 printed "1" instead of "0" and "%.2f" of 0.125 printed "0.13" instead
+	 * of "0.12". Every value below is exactly representable in binary, so these
+	 * are true ties rather than values that merely look like one. */
+	test_assertPrintfs("0 2 2 4", "%.0f %.0f %.0f %.0f", 0.5, 1.5, 2.5, 3.5);
+	test_assertPrintfs("0.12 0.38", "%.2f %.2f", 0.125, 0.375);
+
+	/* Anything strictly past halfway still rounds up; the tie rule must not
+	 * swallow those. None of these are exact ties. */
+	test_assertPrintfs("1 1", "%.0f %.0f", 0.6, 0.51);
+	test_assertPrintfs("0.13", "%.2f", 0.126);
+
+	/* ⚠ The scientific form still rounds ties away from zero: "%.0e" of 2.5
+	 * gives "3e+00" where glibc gives "2e+00". Copying the decimal fix there
+	 * broke %.17g round-tripping (see the comment in libphoenix format.c), so
+	 * it is deliberately left alone and deliberately NOT asserted here. */
+}
+
+
 TEST_GROUP_RUNNER(stdio_printf_fega)
 {
+	RUN_TEST_CASE(stdio_printf_fega, rounding_ties_to_even);
 	RUN_TEST_CASE(stdio_printf_fega, f);
 	RUN_TEST_CASE(stdio_printf_fega, lf);
 	RUN_TEST_CASE(stdio_printf_fega, Lf);
