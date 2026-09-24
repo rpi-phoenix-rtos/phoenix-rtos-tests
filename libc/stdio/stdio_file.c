@@ -1148,6 +1148,71 @@ TEST(stdio_bufs, setvbuf_nobuffer)
 }
 
 
+/*
+ * The cases above all hand setvbuf() a caller-owned buffer. Real ports almost
+ * never do -- they pass NULL and let the library size the buffer -- and that
+ * path was untested, so a stream could be left with a non-zero `bufsz` and no
+ * buffer at all, which reads as "unbuffered" and costs one write() syscall per
+ * character. bash's startup does exactly this, which made `echo > file` on ext2
+ * ~50x slower than dd (one 12.5 ms appending write per byte of output).
+ */
+TEST(stdio_bufs, setvbuf_null_linebuffer_still_buffers)
+{
+	const char data[] = "0123";
+	char buf[BUF_SIZE];
+
+	/* NULL buffer at the size the stream already has: must still buffer. */
+	TEST_ASSERT_EQUAL_INT(0, setvbuf(filep, NULL, _IOLBF, BUFSIZ));
+
+	TEST_ASSERT_GREATER_THAN_INT(0, fputs(data, filep));
+	/* No newline yet, so a line-buffered stream must not have written. */
+	TEST_ASSERT_EQUAL_INT(EOF, fgetc(filep2));
+	clearerr(filep2);
+
+	TEST_ASSERT_GREATER_THAN_INT(0, fputc('\n', filep));
+	TEST_ASSERT_NOT_NULL(fgets(buf, sizeof(buf), filep2));
+	TEST_ASSERT_EQUAL_INT(strlen(data) + 1, strlen(buf));
+}
+
+
+TEST(stdio_bufs, setlinebuf_still_buffers)
+{
+	const char data[] = "0123";
+	char buf[BUF_SIZE];
+
+	/* setlinebuf() is setvbuf(s, NULL, _IOLBF, 0); the 0 becomes BUFSIZ, which
+	 * always equals a default stream's size -- so this is the case that fires
+	 * for every caller of the idiom, on every stream. */
+	setlinebuf(filep);
+
+	TEST_ASSERT_GREATER_THAN_INT(0, fputs(data, filep));
+	TEST_ASSERT_EQUAL_INT(EOF, fgetc(filep2));
+	clearerr(filep2);
+
+	TEST_ASSERT_GREATER_THAN_INT(0, fputc('\n', filep));
+	TEST_ASSERT_NOT_NULL(fgets(buf, sizeof(buf), filep2));
+	TEST_ASSERT_EQUAL_INT(strlen(data) + 1, strlen(buf));
+}
+
+
+TEST(stdio_bufs, setvbuf_null_fullbuffer_still_buffers)
+{
+	const char data[] = "0123";
+	char buf[BUF_SIZE];
+
+	TEST_ASSERT_EQUAL_INT(0, setvbuf(filep, NULL, _IOFBF, BUFSIZ));
+
+	TEST_ASSERT_GREATER_THAN_INT(0, fputs(data, filep));
+	/* Fully buffered and far below BUFSIZ: nothing may reach the file yet. */
+	TEST_ASSERT_EQUAL_INT(EOF, fgetc(filep2));
+	clearerr(filep2);
+
+	TEST_ASSERT_EQUAL_INT(0, fflush(filep));
+	TEST_ASSERT_NOT_NULL(fgets(buf, sizeof(buf), filep2));
+	TEST_ASSERT_EQUAL_STRING(data, buf);
+}
+
+
 TEST_GROUP_RUNNER(stdio_bufs)
 {
 	RUN_TEST_CASE(stdio_bufs, setbuf_basic);
@@ -1156,6 +1221,9 @@ TEST_GROUP_RUNNER(stdio_bufs)
 	RUN_TEST_CASE(stdio_bufs, setvbuf_fullbuffer_overflow);
 	RUN_TEST_CASE(stdio_bufs, setvbuf_linebuffer);
 	RUN_TEST_CASE(stdio_bufs, setvbuf_nobuffer);
+	RUN_TEST_CASE(stdio_bufs, setvbuf_null_linebuffer_still_buffers);
+	RUN_TEST_CASE(stdio_bufs, setlinebuf_still_buffers);
+	RUN_TEST_CASE(stdio_bufs, setvbuf_null_fullbuffer_still_buffers);
 }
 
 
