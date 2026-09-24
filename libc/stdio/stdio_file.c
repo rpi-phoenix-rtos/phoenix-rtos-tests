@@ -194,6 +194,43 @@ TEST(stdio_fopenfclose, freopen_file)
 }
 
 
+TEST(stdio_fopenfclose, freopen_clears_indicators)
+{
+	char buf[BUF_SIZE];
+
+	/* leave known content in the file */
+	filep = fopen(STDIO_TEST_FILENAME, "w");
+	TEST_ASSERT_NOT_NULL(filep);
+	TEST_ASSERT_GREATER_THAN_INT(0, fputs("hello\n", filep));
+	TEST_ASSERT_EQUAL_INT(0, fclose(filep));
+	filep = NULL;
+
+	/* read to EOF, so the stream carries the end-of-file indicator */
+	filep = fopen(STDIO_TEST_FILENAME, "r");
+	TEST_ASSERT_NOT_NULL(filep);
+	while (fgetc(filep) != EOF) {
+	}
+	TEST_ASSERT_TRUE(feof(filep));
+
+	/* C17 7.21.5.4: freopen() clears the error and end-of-file indicators.
+	 * Without that they survive the reopen, and since fgetc_unlocked() returns
+	 * EOF immediately when F_EOF is set, the freshly reopened file reads as
+	 * empty -- the data is there, but no caller can ever see it. */
+	filep2 = freopen(STDIO_TEST_FILENAME, "r", filep);
+	TEST_ASSERT_NOT_NULL(filep2);
+	TEST_ASSERT_FALSE(feof(filep));
+	TEST_ASSERT_FALSE(ferror(filep));
+
+	/* the reopened stream must actually deliver the file's contents */
+	TEST_ASSERT_NOT_NULL(fgets(buf, sizeof(buf), filep));
+	TEST_ASSERT_EQUAL_STRING("hello\n", buf);
+
+	TEST_ASSERT_EQUAL_INT(0, fclose(filep));
+	filep = NULL;
+	filep2 = NULL;
+}
+
+
 TEST(stdio_fopenfclose, fdopen_file)
 {
 	int fd1, fd2, ret;
@@ -260,6 +297,7 @@ TEST_GROUP_RUNNER(stdio_fopenfclose)
 	RUN_TEST_CASE(stdio_fopenfclose, stdio_fclose_twice);
 	RUN_TEST_CASE(stdio_fopenfclose, stdio_fopenfclose_toolongname);
 	RUN_TEST_CASE(stdio_fopenfclose, freopen_file);
+	RUN_TEST_CASE(stdio_fopenfclose, freopen_clears_indicators);
 	RUN_TEST_CASE(stdio_fopenfclose, fdopen_file)
 }
 
