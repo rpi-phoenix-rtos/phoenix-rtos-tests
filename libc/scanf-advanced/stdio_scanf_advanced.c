@@ -1980,8 +1980,54 @@ TEST(stdio_scanf_rest, field_width)
 */
 
 
+TEST(stdio_scanf_aefg, incomplete_item_is_a_matching_failure)
+{
+	/* C17 7.21.6.2p12-13: the input item is the longest sequence that IS, OR IS
+	 * A PREFIX OF, a matching sequence -- and if that item is not itself a
+	 * matching sequence, the directive FAILS. "1e" is only a prefix of "1e5",
+	 * so scanf must reject it. The float path called strtod directly, which
+	 * stops at the longest VALID prefix ("1"), so scanf reported success on
+	 * input it should refuse. This is NOT a strtod bug: strtod("1e") correctly
+	 * returns 1 with endptr at offset 1, because strtod takes a valid prefix
+	 * while scanf must reject a mere prefix. */
+	double d;
+
+	d = -1.0;
+	TEST_ASSERT_EQUAL_INT(0, sscanf("1e", "%lf", &d));
+	TEST_ASSERT_EQUAL_INT(0, sscanf("1e+", "%lf", &d));
+	TEST_ASSERT_EQUAL_INT(0, sscanf("1.5e", "%lf", &d));
+	TEST_ASSERT_EQUAL_INT(0, sscanf("1east", "%lf", &d));
+	TEST_ASSERT_EQUAL_INT(0, sscanf("0x", "%lf", &d));
+	TEST_ASSERT_EQUAL_INT(0, sscanf("0xg", "%lf", &d));
+
+	/* Valid items must be unaffected, including the ones the check could
+	 * plausibly break: a SECOND 'e' does not extend an item that already has an
+	 * exponent, and 'e' is itself a hex digit. */
+	d = -1.0;
+	TEST_ASSERT_EQUAL_INT(1, sscanf("1e5", "%lf", &d));
+	TEST_ASSERT_EQUAL_DOUBLE(100000.0, d);
+
+	d = -1.0;
+	TEST_ASSERT_EQUAL_INT(1, sscanf("1e5e", "%lf", &d));
+	TEST_ASSERT_EQUAL_DOUBLE(100000.0, d);
+
+	d = -1.0;
+	TEST_ASSERT_EQUAL_INT(1, sscanf("0x1e", "%lf", &d));
+	TEST_ASSERT_EQUAL_DOUBLE(30.0, d);
+
+	d = -1.0;
+	TEST_ASSERT_EQUAL_INT(1, sscanf("0x1ep2", "%lf", &d));
+	TEST_ASSERT_EQUAL_DOUBLE(120.0, d);
+
+	d = -1.0;
+	TEST_ASSERT_EQUAL_INT(1, sscanf("1e-5", "%lf", &d));
+	TEST_ASSERT_EQUAL_DOUBLE(1e-5, d);
+}
+
+
 TEST_GROUP_RUNNER(stdio_scanf_aefg)
 {
+	RUN_TEST_CASE(stdio_scanf_aefg, incomplete_item_is_a_matching_failure);
 	RUN_TEST_CASE(stdio_scanf_aefg, f);
 	RUN_TEST_CASE(stdio_scanf_aefg, F);
 	RUN_TEST_CASE(stdio_scanf_aefg, a);
