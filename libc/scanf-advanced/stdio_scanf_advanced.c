@@ -1998,8 +1998,54 @@ TEST_GROUP_RUNNER(stdio_scanf_aefg)
 }
 
 
+TEST(stdio_scanf_cspn, n_counts_suppressed_conversions)
+{
+	/* %n reports the characters READ SO FAR, which includes those consumed by
+	 * an assignment-suppressed conversion. scanf.c recorded consumption as
+	 * `p - buf`, the count of characters COPIED for conversion -- and a
+	 * suppressed conversion copies nothing, so %n came out short by exactly the
+	 * suppressed digits. The same confusion made the "0x" prefix test
+	 * (p == buf + 1) unreachable for %*i/%*x and read buf[-1] whenever nothing
+	 * had been copied. */
+	int v, n;
+
+	v = n = -1;
+	TEST_ASSERT_EQUAL_INT(1, sscanf("1 2", "%*d%d%n", &v, &n));
+	TEST_ASSERT_EQUAL_INT(2, v);
+	TEST_ASSERT_EQUAL_INT(3, n);
+
+	v = n = -1;
+	TEST_ASSERT_EQUAL_INT(1, sscanf("12 34", "%*d%d%n", &v, &n));
+	TEST_ASSERT_EQUAL_INT(34, v);
+	TEST_ASSERT_EQUAL_INT(5, n);
+
+	v = n = -1;
+	TEST_ASSERT_EQUAL_INT(1, sscanf("  1 2", "%*d%d%n", &v, &n));
+	TEST_ASSERT_EQUAL_INT(2, v);
+	TEST_ASSERT_EQUAL_INT(5, n);
+
+	v = n = -1;
+	TEST_ASSERT_EQUAL_INT(1, sscanf("1,2", "%*d,%d%n", &v, &n));
+	TEST_ASSERT_EQUAL_INT(2, v);
+	TEST_ASSERT_EQUAL_INT(3, n);
+
+	/* a suppressed hex conversion must still consume its 0x prefix */
+	v = n = -1;
+	TEST_ASSERT_EQUAL_INT(1, sscanf("0x10 7", "%*i%d%n", &v, &n));
+	TEST_ASSERT_EQUAL_INT(7, v);
+	TEST_ASSERT_EQUAL_INT(6, n);
+
+	/* and the unsuppressed path must be unchanged */
+	v = n = -1;
+	TEST_ASSERT_EQUAL_INT(1, sscanf("1 2", "%d%n", &v, &n));
+	TEST_ASSERT_EQUAL_INT(1, v);
+	TEST_ASSERT_EQUAL_INT(1, n);
+}
+
+
 TEST_GROUP_RUNNER(stdio_scanf_cspn)
 {
+	RUN_TEST_CASE(stdio_scanf_cspn, n_counts_suppressed_conversions);
 	RUN_TEST_CASE(stdio_scanf_cspn, c);
 	RUN_TEST_CASE(stdio_scanf_cspn, c_ascii);
 	RUN_TEST_CASE(stdio_scanf_cspn, s_path);
