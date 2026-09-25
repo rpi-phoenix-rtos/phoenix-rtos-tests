@@ -84,7 +84,15 @@ TEST(va2pa, unmapped_page_resolves_to_zero)
 
 
 /* NULL has no translation. Cheap, and it is the degenerate case every caller
- * passes sooner or later. */
+ * passes sooner or later.
+ *
+ * This case is only safe to assert because page 0 really is unmapped for a user
+ * process on this target -- if some port deliberately mapped it (a few do, to
+ * catch NULL derefs), pmap_resolve() would walk a valid descriptor and return
+ * non-zero, and this test would go red on a correct system. The evidence it is
+ * not mapped here: a Data Abort with esr=0x92000047 far=0x0 is in the archive
+ * (a write to NULL from /bin/ntpclient, 2026-09-11) -- a WRITE to address 0 took
+ * a translation fault, which it could not do if page 0 were mapped writable. */
 TEST(va2pa, null_resolves_to_zero)
 {
 	TEST_ASSERT_EQUAL_UINT64(0, (uint64_t)va2pa(NULL));
