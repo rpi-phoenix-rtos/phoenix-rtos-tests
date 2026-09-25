@@ -127,10 +127,37 @@ TEST(va2pa, offset_within_page_is_preserved)
 }
 
 
+/* ⚠ THE FOOTGUN, pinned down by a test so nobody has to rediscover it.
+ *
+ * va2pa() is (pmap_resolve(va & ~0xfff) & ~0xfff) + (va & 0xfff). On an UNMAPPED
+ * page pmap_resolve gives 0, so the result is 0 + the in-page offset -- which is
+ * NON-ZERO for any address that is not page-aligned. A caller probing "is this
+ * mapped?" with an unaligned pointer therefore gets a truthy answer for memory
+ * that is not mapped at all, and only finds out by faulting on the next read.
+ *
+ * Every mapping probe must page-align first. libphoenix's allocator does, and
+ * this test is what keeps that from silently regressing. */
+TEST(va2pa, unmapped_unaligned_returns_the_offset_not_zero)
+{
+	volatile char *p = mmap(NULL, VA2PA_PAGE, PROT_READ | PROT_WRITE,
+			MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+
+	TEST_ASSERT_NOT_EQUAL(MAP_FAILED, (void *)p);
+	p[0] = 'x';
+	TEST_ASSERT_EQUAL_INT(0, munmap((void *)p, VA2PA_PAGE));
+
+	/* Page-aligned: honest 0. */
+	TEST_ASSERT_EQUAL_UINT64(0, (uint64_t)va2pa((void *)p));
+	/* Same dead page, offset 64: returns 64, NOT 0. */
+	TEST_ASSERT_EQUAL_UINT64(64u, (uint64_t)va2pa((void *)(p + 64)));
+}
+
+
 TEST_GROUP_RUNNER(va2pa)
 {
 	RUN_TEST_CASE(va2pa, mapped_page_resolves);
 	RUN_TEST_CASE(va2pa, unmapped_page_resolves_to_zero);
 	RUN_TEST_CASE(va2pa, null_resolves_to_zero);
 	RUN_TEST_CASE(va2pa, offset_within_page_is_preserved);
+	RUN_TEST_CASE(va2pa, unmapped_unaligned_returns_the_offset_not_zero);
 }
