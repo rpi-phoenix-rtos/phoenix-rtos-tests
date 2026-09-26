@@ -34,6 +34,8 @@ void runner(void)
 	RUN_TEST_GROUP(stdio_ftell);
 	RUN_TEST_GROUP(stdio_getdelim);
 	RUN_TEST_GROUP(stdio_ext);
+	RUN_TEST_GROUP(stdio_memstream);
+	RUN_TEST_GROUP(stdio_fmemopen);
 }
 
 
