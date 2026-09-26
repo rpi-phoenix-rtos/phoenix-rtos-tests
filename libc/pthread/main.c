@@ -27,6 +27,7 @@ void runner(void)
 	RUN_TEST_GROUP(test_pthread_fdrace);
 	RUN_TEST_GROUP(test_pthread_guard);
 	RUN_TEST_GROUP(pthread_canceltype);
+	RUN_TEST_GROUP(pthread_barrier);
 }
 
 
