@@ -22,6 +22,7 @@ void runner(void)
 	RUN_TEST_GROUP(dirent_closedir);
 	RUN_TEST_GROUP(dirent_readdir);
 	RUN_TEST_GROUP(dirent_rewinddir);
+	RUN_TEST_GROUP(dirent_scandir);
 }
 
 
