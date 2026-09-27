@@ -24,6 +24,16 @@
  * the tty through a port, and this target has already had one multi-waiter
  * wakeup bug, so contention on that path is worth a direct test.
  *
+ * -f launches with fork() instead of vfork(). Every launch above used vfork,
+ * and the kernel's exec takes a different path for a fork()ed child: that
+ * child owns a private copy of the parent's map, which exec destroys and then
+ * re-creates in place, whereas a vfork child borrows the parent's map and exec
+ * simply gives it a fresh one. psh starts ntpclient with fork()+exec, and
+ * ntpclient is the one process whose data pages have been seen not to hold
+ * what it wrote (docs/misc/2026-09-27-c9-ntpclient-faults.md in the
+ * coordination repository). Like psh, the forked child writes to its copy of
+ * the address space before it execs, so exec tears down COW-split pages.
+ *
  * Copyright 2026 Phoenix Systems
  *
  * This file is part of Phoenix-RTOS.
@@ -43,6 +53,10 @@
 #define SPAWN_MAX_PARALLEL 32u
 
 
+/* Written by a -f child before exec, so a .bss page is COW-split. */
+static volatile unsigned long spawn_childTouch;
+
+
 static unsigned long spawn_elapsedMs(const struct timeval *start, const struct timeval *end)
 {
 	return (unsigned long)(end->tv_sec - start->tv_sec) * 1000uL
@@ -60,20 +74,29 @@ int main(int argc, char *argv[])
 	pid_t inflight[SPAWN_MAX_PARALLEL];
 	unsigned long slot;
 	pid_t pid;
-	int status, res, devNull, argi = 1;
+	int status, res, devNull, argi = 1, useFork = 0;
 
-	/* -p is optional so the sequential invocations already on record still work. */
-	if ((argc > 2) && (strcmp(argv[1], "-p") == 0)) {
-		parallel = strtoul(argv[2], NULL, 10);
-		if ((parallel == 0) || (parallel > SPAWN_MAX_PARALLEL)) {
-			fprintf(stderr, "spawn-storm: -p must be 1..%u\n", (unsigned int)SPAWN_MAX_PARALLEL);
-			return EXIT_FAILURE;
+	/* Both options are optional so the invocations already on record still work. */
+	for (;;) {
+		if ((argc > (argi + 1)) && (strcmp(argv[argi], "-p") == 0)) {
+			parallel = strtoul(argv[argi + 1], NULL, 10);
+			if ((parallel == 0) || (parallel > SPAWN_MAX_PARALLEL)) {
+				fprintf(stderr, "spawn-storm: -p must be 1..%u\n", (unsigned int)SPAWN_MAX_PARALLEL);
+				return EXIT_FAILURE;
+			}
+			argi += 2;
 		}
-		argi = 3;
+		else if ((argc > argi) && (strcmp(argv[argi], "-f") == 0)) {
+			useFork = 1;
+			argi += 1;
+		}
+		else {
+			break;
+		}
 	}
 
 	if (argc < (argi + 2)) {
-		fprintf(stderr, "usage: %s [-p <parallel>] <iterations> <path> [args...]\n", argv[0]);
+		fprintf(stderr, "usage: %s [-f] [-p <parallel>] <iterations> <path> [args...]\n", argv[0]);
 		return EXIT_FAILURE;
 	}
 
@@ -96,7 +119,8 @@ int main(int argc, char *argv[])
 
 	devNull = (parallel > 1) ? open("/dev/null", O_WRONLY) : -1;
 
-	printf("spawn-storm: %lu launches of %s, %lu at a time%s\n", iterations, childPath, parallel,
+	printf("spawn-storm: %lu launches of %s via %s, %lu at a time%s\n", iterations, childPath,
+			(useFork != 0) ? "fork" : "vfork", parallel,
 			(parallel == 1) ? " (child output kept)"
 					: ((devNull >= 0) ? " (child output muted)"
 							: " (no /dev/null: child output will interleave)"));
@@ -119,9 +143,10 @@ int main(int argc, char *argv[])
 
 			gettimeofday(&before[slot], NULL);
 
-			pid = vfork();
+			pid = (useFork != 0) ? fork() : vfork();
 			if (pid < 0) {
-				printf("spawn-storm: launch %lu vfork failed (%s)\n", launched + 1, strerror(errno));
+				printf("spawn-storm: launch %lu %s failed (%s)\n", launched + 1,
+						(useFork != 0) ? "fork" : "vfork", strerror(errno));
 				failed++;
 				launched++;
 				reaped++;
@@ -138,6 +163,20 @@ int main(int argc, char *argv[])
 				if ((parallel > 1) && (devNull >= 0)) {
 					dup2(devNull, STDOUT_FILENO);
 					dup2(devNull, STDERR_FILENO);
+				}
+				if (useFork != 0) {
+					/* What psh_clockSync() does between fork and exec: a syscall
+					 * that goes to the filesystem, plus writes that COW-split
+					 * pages of .data/.bss, the stack and the heap, so exec has
+					 * private pages to tear down rather than a pristine copy. */
+					char *scratch = malloc(64);
+
+					(void)access(childPath, X_OK);
+					if (scratch != NULL) {
+						memset(scratch, 0x5a, 64);
+						free(scratch);
+					}
+					spawn_childTouch = launched;
 				}
 				execv(childPath, childArgv);
 				_exit(EXIT_FAILURE);
