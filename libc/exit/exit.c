@@ -18,6 +18,7 @@
  * %LICENSE%
  */
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <sys/wait.h>
@@ -1102,6 +1103,95 @@ TEST(stdlib_exit, atexit_register_inside)
 }
 
 
+/* What the exit-time handler of stdlib_exit.closed_std_streams inspects. */
+static struct {
+	FILE *out; /* stdout as a C++ runtime keeps it: libstdc++'s std::cout does */
+	FILE *in;
+	int fd;
+} test_closedStd;
+
+
+static void test_atexit_closedStd(void)
+{
+	/* Runs where std::ios_base::Init::~Init() runs, and does what it does:
+	 * flushes the stream it saved at startup, closed or not. */
+	int res[4];
+
+	res[0] = fflush(test_closedStd.out);
+	res[1] = fileno(test_closedStd.out);
+	res[2] = fflush(test_closedStd.in);
+	res[3] = fileno(test_closedStd.in);
+	write(test_closedStd.fd, res, sizeof(res));
+	close(test_closedStd.fd);
+}
+
+
+TEST(stdlib_exit, closed_std_streams)
+{
+	/* A closed standard stream must stay safe to name until the process exits.
+	 * SuperTuxKart ends main() with fclose(stderr); fclose(stdout); and then
+	 * std::cout's exit-time flush fflush()es the stdout it cached at startup.
+	 * libphoenix used to free() the stream objects, so that flush read freed
+	 * memory -- a Data Abort (far=0xba, file_rawSeek) once the heap had reused
+	 * it. glibc and musl never free these objects; libphoenix now empties them.
+	 * The child recycles the heap before exiting, as a real program does. */
+	pid_t pid;
+	int fd;
+
+	fd = open(TEST_EXIT_PATH, O_RDWR | O_CREAT | O_TRUNC, S_IFREG | DEFFILEMODE);
+	TEST_ASSERT_NOT_EQUAL_INT(-1, fd);
+
+	/* nothing of the runner's output may be left for the child to flush again */
+	fflush(stdout);
+
+	pid = fork();
+	TEST_ASSERT_GREATER_OR_EQUAL(0, pid);
+	/* child */
+	if (pid == 0) {
+		int i;
+		void *p;
+
+		test_closedStd.out = stdout;
+		test_closedStd.in = stdin;
+		test_closedStd.fd = fd;
+		atexit(test_atexit_closedStd);
+
+		fclose(stdout);
+		/* a failed freopen() closes the stream as well */
+		freopen("/nonexistent-dir/" TEST_EXIT_PATH, "r", stdin);
+
+		for (i = 0; i < 64; i++) {
+			p = malloc(sizeof(FILE));
+			if (p != NULL) {
+				memset(p, 0x5a, sizeof(FILE));
+			}
+		}
+
+		exit(EXIT_SUCCESS);
+	}
+	/* parent */
+	else {
+		int status, ret, res[4];
+
+		ret = waitpid(pid, &status, 0);
+		TEST_ASSERT_EQUAL_INT(pid, ret);
+		/* not killed by a fault in the exit-time flush */
+		TEST_ASSERT_TRUE(WIFEXITED(status));
+		TEST_ASSERT_EQUAL_INT(EXIT_SUCCESS, WEXITSTATUS(status));
+
+		TEST_ASSERT_EQUAL_INT(0, lseek(fd, 0, SEEK_SET));
+		TEST_ASSERT_EQUAL_INT(sizeof(res), read(fd, res, sizeof(res)));
+		TEST_ASSERT_EQUAL_INT_MESSAGE(0, res[0], "fflush(closed stdout)");
+		TEST_ASSERT_EQUAL_INT_MESSAGE(-1, res[1], "fileno(closed stdout)");
+		TEST_ASSERT_EQUAL_INT_MESSAGE(0, res[2], "fflush(stdin after a failed freopen)");
+		TEST_ASSERT_EQUAL_INT_MESSAGE(-1, res[3], "fileno(stdin after a failed freopen)");
+
+		close(fd);
+		remove(TEST_EXIT_PATH);
+	}
+}
+
+
 TEST(stdlib_exit, atexit_two_nodes)
 {
 	/* Test exit calling all registered functions with more than 1 node */
@@ -1279,6 +1369,7 @@ TEST_GROUP_RUNNER(stdlib_exit)
 	RUN_TEST_CASE(stdlib_exit, atexit_few_calls);
 	RUN_TEST_CASE(stdlib_exit, atexit_register_inside);
 	RUN_TEST_CASE(stdlib_exit, atexit_two_nodes);
+	RUN_TEST_CASE(stdlib_exit, closed_std_streams);
 }
 
 
