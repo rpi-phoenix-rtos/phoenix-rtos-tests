@@ -333,6 +333,37 @@ TEST(ctype, _toupper)
 }
 
 
+/* C17 7.1.4: a library function implemented as a macro must evaluate each
+ * argument exactly once. libphoenix's "fast macro" ctype once expanded its
+ * argument two or three times, so isdigit(*p++) skipped every other
+ * character (xorg-server's config scanner read "24" as 2). */
+TEST(ctype, single_evaluation)
+{
+	static const char s[] = "24\n";
+	const char *p = s;
+	int n = 0;
+
+	while (isdigit(*p++)) {
+		n++;
+	}
+	TEST_ASSERT_EQUAL_INT(2, n);
+	TEST_ASSERT_EQUAL_INT(3, (int)(p - s));
+
+	p = s;
+	TEST_ASSERT_TRUE(isalnum(*p++));
+	TEST_ASSERT_EQUAL_PTR(s + 1, p);
+	TEST_ASSERT_TRUE(isxdigit(*p++));
+	TEST_ASSERT_EQUAL_PTR(s + 2, p);
+	TEST_ASSERT_TRUE(isspace(*p++));
+	TEST_ASSERT_EQUAL_PTR(s + 3, p);
+
+	p = "aZ";
+	TEST_ASSERT_EQUAL_INT('A', toupper(*p++));
+	TEST_ASSERT_EQUAL_INT('z', tolower(*p++));
+	TEST_ASSERT_EQUAL_INT(0, *p);
+}
+
+
 TEST_GROUP_RUNNER(ctype)
 {
 	RUN_TEST_CASE(ctype, isalnum);
@@ -353,4 +384,5 @@ TEST_GROUP_RUNNER(ctype)
 	RUN_TEST_CASE(ctype, toupper);
 	RUN_TEST_CASE(ctype, _tolower);
 	RUN_TEST_CASE(ctype, _toupper);
+	RUN_TEST_CASE(ctype, single_evaluation);
 }
