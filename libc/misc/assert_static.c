@@ -77,8 +77,11 @@ TEST(assert_static, block_scope)
 
 
 /* Re-including <assert.h> with NDEBUG must disable assert() but NOT
- * static_assert (C11 7.2p1 makes only assert depend on NDEBUG). */
+ * static_assert (C11 7.2p1 makes only assert depend on NDEBUG). A release
+ * build may already pass -DNDEBUG, so define it only when it is not set. */
+#ifndef NDEBUG
 #define NDEBUG
+#endif
 #include <assert.h>
 
 static_assert(1, "still available after re-inclusion with NDEBUG");
