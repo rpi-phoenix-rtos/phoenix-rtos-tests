@@ -13,6 +13,10 @@
  * %LICENSE%
  */
 
+#ifdef __linux__
+#define _GNU_SOURCE /* struct ucred (SO_PEERCRED) on host-generic-pc */
+#endif
+
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -34,6 +38,17 @@
 
 #include "common.h"
 #include "unity_fixture.h"
+
+/* A libc without SO_PEERCRED still builds this suite: the kernel then answers
+ * ENOPROTOOPT and the peercred tests fail, naming the missing option. */
+#ifndef SO_PEERCRED
+#define SO_PEERCRED 0x1022
+struct ucred {
+	pid_t pid;
+	uid_t uid;
+	gid_t gid;
+};
+#endif
 
 #define BAD_FD 33333 /* should be bad descriptor */
 
@@ -2997,6 +3012,131 @@ TEST(test_unix_socket, poll_full_shut_writable)
 }
 
 
+/* SO_PEERCRED of fd: 0 and *cred filled, or -1 with errno set */
+static int unix_peercred(int fd, struct ucred *cred)
+{
+	socklen_t len = sizeof(*cred);
+
+	memset(cred, 0xa5, sizeof(*cred));
+	if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, cred, &len) < 0) {
+		return -1;
+	}
+	if (len != sizeof(*cred)) {
+		errno = EMSGSIZE;
+		return -1;
+	}
+	return 0;
+}
+
+
+static void unix_peercred_expect(int fd, pid_t pid, const char *what)
+{
+	struct ucred cred;
+	char msg[128];
+	int err;
+
+	err = unix_peercred(fd, &cred);
+	snprintf(msg, sizeof(msg), "%s: getsockopt(SO_PEERCRED) errno=%d (%s)", what, (err < 0) ? errno : 0,
+		(err < 0) ? strerror(errno) : "ok");
+	TEST_ASSERT_EQUAL_INT_MESSAGE(0, err, msg);
+	TEST_ASSERT_EQUAL_INT_MESSAGE(pid, cred.pid, what);
+	TEST_ASSERT_EQUAL_INT_MESSAGE(getuid(), cred.uid, what);
+	TEST_ASSERT_EQUAL_INT_MESSAGE(getgid(), cred.gid, what);
+}
+
+
+/* socketpair(): both ends report the creating process */
+TEST(test_unix_socket, peercred_socketpair)
+{
+	unsigned int types[] = { SOCK_STREAM, SOCK_DGRAM, SOCK_SEQPACKET };
+	size_t i;
+	int sv[2];
+
+	for (i = 0; i < sizeof(types) / sizeof(types[0]); i++) {
+		TEST_ASSERT_EQUAL_INT(0, socketpair(AF_UNIX, types[i], 0, sv));
+		unix_peercred_expect(sv[0], getpid(), "socketpair end 0");
+		unix_peercred_expect(sv[1], getpid(), "socketpair end 1");
+		close(sv[0]);
+		close(sv[1]);
+	}
+}
+
+
+/*
+ * connect()/accept() across two processes: the accepted socket reports the
+ * connecting process, the connecting socket reports the listening one (as on
+ * Linux, whose D-Bus EXTERNAL authentication reads the accepted side).
+ */
+static void unix_peercred_connect(unsigned int type)
+{
+	const char *name = "/tmp/test_peercred";
+	pid_t parent = getpid(), child;
+	int lfd, afd, cfd, status;
+	char c = 'x';
+
+	lfd = unix_named_socket(type, name);
+	TEST_ASSERT_GREATER_OR_EQUAL_INT(0, lfd);
+	TEST_ASSERT_EQUAL_INT(0, listen(lfd, 1));
+
+	child = safe_fork();
+	if (child == 0) {
+		struct ucred cred;
+
+		close(lfd);
+		cfd = socket(AF_UNIX, type, 0);
+		CHILD_ASSERT(cfd >= 0);
+		CHILD_ASSERT(connect_to_named(cfd, name) == 0);
+		CHILD_ASSERT(unix_peercred(cfd, &cred) == 0);
+		CHILD_ASSERT(cred.pid == parent);
+		/* hold the connection until the parent has read its side */
+		CHILD_ASSERT(read(cfd, &c, 1) == 1);
+		close(cfd);
+		_exit(0); /* not exit(): that would flush the parent's buffered stdout a second time */
+	}
+
+	afd = accept(lfd, NULL, NULL);
+	TEST_ASSERT_GREATER_OR_EQUAL_INT(0, afd);
+	unix_peercred_expect(afd, child, "accepted socket");
+	TEST_ASSERT_EQUAL_INT(1, write(afd, &c, 1));
+
+	TEST_ASSERT_EQUAL_INT(child, waitpid(child, &status, 0));
+	TEST_ASSERT_TRUE(WIFEXITED(status));
+	TEST_ASSERT_EQUAL_INT(0, WEXITSTATUS(status));
+
+	close(afd);
+	close(lfd);
+	unlink(name);
+}
+
+
+TEST(test_unix_socket, peercred_connect)
+{
+	unix_peercred_connect(SOCK_STREAM);
+	unix_peercred_connect(SOCK_SEQPACKET);
+}
+
+
+/* No peer, no credentials. Linux answers pid 0 instead of failing. */
+TEST(test_unix_socket, peercred_unconnected)
+{
+	struct ucred cred;
+	int fd, err;
+
+	fd = socket(AF_UNIX, SOCK_STREAM, 0);
+	TEST_ASSERT_GREATER_OR_EQUAL_INT(0, fd);
+
+	err = unix_peercred(fd, &cred);
+	if (err < 0) {
+		TEST_ASSERT_EQUAL_INT(ENOTCONN, errno);
+	}
+	else {
+		TEST_ASSERT_EQUAL_INT(0, cred.pid);
+	}
+
+	close(fd);
+}
+
+
 TEST_GROUP_RUNNER(test_unix_socket)
 {
 	RUN_TEST_CASE(test_unix_socket, zero_len_send);
@@ -3037,6 +3177,9 @@ TEST_GROUP_RUNNER(test_unix_socket)
 	RUN_TEST_CASE(test_unix_socket, connect_abort);
 	RUN_TEST_CASE(test_unix_socket, dgram_msg_peek);
 	RUN_TEST_CASE(test_unix_socket, dgram_sender_isolation);
+	RUN_TEST_CASE(test_unix_socket, peercred_socketpair);
+	RUN_TEST_CASE(test_unix_socket, peercred_connect);
+	RUN_TEST_CASE(test_unix_socket, peercred_unconnected);
 }
 
 void runner(void)
