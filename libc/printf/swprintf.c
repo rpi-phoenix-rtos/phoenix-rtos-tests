@@ -121,6 +121,26 @@ TEST(wide_printf, length_modifiers)
 }
 
 
+TEST(wide_printf, flag_grouping)
+{
+	wchar_t buf[64];
+
+	/* POSIX ' flag: no thousands separator in the C locale; the trailing %d
+	 * proves the argument was consumed */
+	TEST_ASSERT_EQUAL_INT(12, swprintf(buf, 64, L"[%'d|%d]", 1234567, 99));
+	TEST_ASSERT_EQUAL_INT(0, wcscmp(buf, L"[1234567|99]"));
+
+	swprintf(buf, 64, L"[%'lld bytes|%d]", 16535624089LL, 99);
+	TEST_ASSERT_EQUAL_INT(0, wcscmp(buf, L"[16535624089 bytes|99]"));
+
+	swprintf(buf, 64, L"[%'10.3f|%d]", 1234.5678, 99);
+	TEST_ASSERT_EQUAL_INT(0, wcscmp(buf, L"[  1234.568|99]"));
+
+	swprintf(buf, 64, L"[%0'8d]", -1234);
+	TEST_ASSERT_EQUAL_INT(0, wcscmp(buf, L"[-0001234]"));
+}
+
+
 TEST(wide_printf, floats)
 {
 	wchar_t buf[64];
@@ -221,6 +241,7 @@ TEST_GROUP_RUNNER(wide_printf)
 	RUN_TEST_CASE(wide_printf, integers);
 	RUN_TEST_CASE(wide_printf, length_modifiers);
 	RUN_TEST_CASE(wide_printf, floats);
+	RUN_TEST_CASE(wide_printf, flag_grouping);
 	RUN_TEST_CASE(wide_printf, chars_narrow_and_wide);
 	RUN_TEST_CASE(wide_printf, strings_multibyte_and_wide);
 	RUN_TEST_CASE(wide_printf, star_width_and_precision);
