@@ -32,7 +32,10 @@
  * ntpclient is the one process whose data pages have been seen not to hold
  * what it wrote (docs/misc/2026-09-27-c9-ntpclient-faults.md in the
  * coordination repository). Like psh, the forked child writes to its copy of
- * the address space before it execs, so exec tears down COW-split pages.
+ * the address space before it execs. (On the MMU targets that copy is not
+ * copy-on-write: process->lazy is 0 there, so vm_mapCopy() copies every page
+ * of the parent up front, and those writes split nothing -- they are here
+ * because psh makes them.)
  *
  * STEP TAGS AND THE WATCHDOG. The first -f runs stopped dead, about once in a
  * hundred launches, with no fault and no status -- and the console was cut
@@ -108,7 +111,7 @@
 #define STORM_WORKER_ARG "--worker"
 
 
-/* Written by a -f child before exec, so a .bss page is COW-split. */
+/* Written by a -f child before exec, as psh's child writes its .bss. */
 static volatile unsigned long spawn_childTouch;
 
 /* Monitor-only. Static, so a snapshot allocates nothing while the system is wedged. */
@@ -559,9 +562,8 @@ int main(int argc, char *argv[])
 				}
 				if (useFork != 0) {
 					/* What psh_clockSync() does between fork and exec: a syscall
-					 * that goes to the filesystem, plus writes that COW-split
-					 * pages of .data/.bss, the stack and the heap, so exec has
-					 * private pages to tear down rather than a pristine copy. */
+					 * that goes to the filesystem, plus writes to .data/.bss,
+					 * the stack and the heap of the child's copy. */
 					char *scratch = malloc(64);
 
 					storm_tag(tags, "c", "ac", launched + 1, 0, 0, 0, 0);
