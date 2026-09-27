@@ -2231,6 +2231,31 @@ TEST(stdio_printf_rest, lmods_zero_float)
 }
 
 
+TEST(stdio_printf_rest, flag_grouping)
+{
+	/*
+	 * POSIX/XSI ' flag: group the integer part with LC_NUMERIC's thousands_sep.
+	 * The program runs in the C locale, whose separator is empty, so the output
+	 * equals the flag-less conversion. The trailing %d proves the argument was
+	 * consumed and the ones after it are not shifted.
+	 */
+	test_assertPrintfs("1234567|99", "%'d|%d", 1234567 COMMA 99);
+	test_assertVprintfs("1234567|99", "%'d|%d", 1234567, 99);
+
+	test_assertPrintfs("16535624089 bytes|99", "%'llu bytes|%d", 16535624089ULL COMMA 99);
+	test_assertVprintfs("16535624089 bytes|99", "%'llu bytes|%d", 16535624089ULL, 99);
+
+	test_assertPrintfs("  1234.568|99", "%'10.3f|%d", 1234.5678 COMMA 99);
+	test_assertVprintfs("  1234.568|99", "%'10.3f|%d", 1234.5678, 99);
+
+	test_assertPrintfs("1234    |99", "%-'8d|%d", 1234 COMMA 99);
+	test_assertVprintfs("1234    |99", "%-'8d|%d", 1234, 99);
+
+	test_assertPrintfs("-0001234|99", "%0'8d|%d", -1234 COMMA 99);
+	test_assertVprintfs("-0001234|99", "%0'8d|%d", -1234, 99);
+}
+
+
 TEST(stdio_printf_rest, numbered_argument)
 {
 /* Disabled because of #719 issue: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/719 */
@@ -2561,6 +2586,7 @@ TEST_GROUP_RUNNER(stdio_printf_rest)
 
 	RUN_TEST_CASE(stdio_printf_rest, lmods_zero_int);
 	RUN_TEST_CASE(stdio_printf_rest, lmods_zero_float);
+	RUN_TEST_CASE(stdio_printf_rest, flag_grouping);
 	RUN_TEST_CASE(stdio_printf_rest, numbered_argument);
 
 	RUN_TEST_CASE(stdio_printf_rest, snprintf_truncation);

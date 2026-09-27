@@ -17,6 +17,7 @@
 #define _GNU_SOURCE /* struct ucred (SO_PEERCRED) on host-generic-pc */
 #endif
 
+#include <stddef.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -3182,9 +3183,293 @@ TEST_GROUP_RUNNER(test_unix_socket)
 	RUN_TEST_CASE(test_unix_socket, peercred_unconnected);
 }
 
+/*
+ * getsockname() and getpeername()
+ *
+ * Every address is read into a buffer filled with a pattern whose family is not
+ * AF_UNIX, so a call that returns 0 without writing anything fails the family
+ * check instead of passing on a zeroed buffer.
+ */
+
+#define SOCKNAME_FILL 0xa5
+
+typedef int (*sockname_fn_t)(int, struct sockaddr *, socklen_t *);
+
+
+/* Expects `fn` to report `path` for `fd`, or the family alone if `path` is NULL. */
+static void sockname_expect(sockname_fn_t fn, int fd, const char *path, const char *what)
+{
+	struct sockaddr_un addr;
+	socklen_t len = sizeof(addr);
+
+	memset(&addr, SOCKNAME_FILL, sizeof(addr));
+
+	TEST_ASSERT_EQUAL_INT_MESSAGE(0, fn(fd, (struct sockaddr *)&addr, &len), what);
+	TEST_ASSERT_EQUAL_INT_MESSAGE(AF_UNIX, addr.sun_family, what);
+
+	if (path == NULL) {
+		TEST_ASSERT_EQUAL_INT_MESSAGE(sizeof(sa_family_t), len, what);
+	}
+	else {
+		TEST_ASSERT_EQUAL_INT_MESSAGE(offsetof(struct sockaddr_un, sun_path) + strlen(path) + 1, len, what);
+		TEST_ASSERT_EQUAL_STRING_MESSAGE(path, addr.sun_path, what);
+	}
+}
+
+
+/* Connects the unconnected `client` to the listener `server` bound to `name`, returns the accepted socket. */
+static int sockname_connect(int server, int client, const char *name)
+{
+	int fd;
+
+	/* a blocking connect() waits for accept() on Phoenix-RTOS */
+	TEST_ASSERT_EQUAL_INT(0, set_nonblock(client, 1));
+	if ((connect_to_named(client, name) < 0) && (errno != EINPROGRESS)) {
+		FAIL("connect");
+	}
+
+	fd = accept(server, NULL, NULL);
+	TEST_ASSERT_GREATER_OR_EQUAL_INT(0, fd);
+	TEST_ASSERT_EQUAL_INT(0, set_nonblock(client, 0));
+
+	return fd;
+}
+
+
+TEST_GROUP(test_unix_sockname);
+
+
+TEST_SETUP(test_unix_sockname)
+{
+}
+
+
+TEST_TEAR_DOWN(test_unix_sockname)
+{
+	fflush(stdout);
+}
+
+
+TEST(test_unix_sockname, getsockname_bound)
+{
+	const char *name = "/tmp/sockname_bound";
+	int types[] = { SOCK_STREAM, SOCK_DGRAM, SOCK_SEQPACKET };
+	size_t i;
+	int fd;
+
+	for (i = 0; i < sizeof(types) / sizeof(types[0]); i++) {
+		fd = unix_named_socket(types[i], name);
+		TEST_ASSERT_GREATER_OR_EQUAL_INT(0, fd);
+
+		sockname_expect(getsockname, fd, name, "bound");
+
+		/* the name stays with the socket once its file is gone */
+		TEST_ASSERT_EQUAL_INT(0, unlink(name));
+		sockname_expect(getsockname, fd, name, "bound, unlinked");
+
+		close(fd);
+	}
+}
+
+
+TEST(test_unix_sockname, getsockname_unbound)
+{
+	int types[] = { SOCK_STREAM, SOCK_DGRAM, SOCK_SEQPACKET };
+	size_t i;
+	int fd;
+
+	for (i = 0; i < sizeof(types) / sizeof(types[0]); i++) {
+		fd = socket(AF_UNIX, types[i], 0);
+		TEST_ASSERT_GREATER_OR_EQUAL_INT(0, fd);
+
+		sockname_expect(getsockname, fd, NULL, "unbound");
+
+		close(fd);
+	}
+}
+
+
+TEST(test_unix_sockname, getpeername_connected)
+{
+	const char *name = "/tmp/sockname_server";
+	int server, client, conn;
+
+	server = unix_named_socket(SOCK_STREAM, name);
+	TEST_ASSERT_GREATER_OR_EQUAL_INT(0, server);
+	TEST_ASSERT_EQUAL_INT(0, listen(server, 1));
+
+	client = socket(AF_UNIX, SOCK_STREAM, 0);
+	TEST_ASSERT_GREATER_OR_EQUAL_INT(0, client);
+	conn = sockname_connect(server, client, name);
+
+	/* the client reports the listener's name, the accepted socket reports it as its own */
+	sockname_expect(getpeername, client, name, "client peer");
+	sockname_expect(getsockname, client, NULL, "client self");
+	sockname_expect(getpeername, conn, NULL, "accepted peer");
+	sockname_expect(getsockname, conn, name, "accepted self");
+
+	close(conn);
+	close(client);
+	close(server);
+	unlink(name);
+}
+
+
+TEST(test_unix_sockname, getpeername_bound_client)
+{
+	const char *name = "/tmp/sockname_server";
+	const char *clientName = "/tmp/sockname_client";
+	int server, client, conn;
+
+	server = unix_named_socket(SOCK_STREAM, name);
+	TEST_ASSERT_GREATER_OR_EQUAL_INT(0, server);
+	TEST_ASSERT_EQUAL_INT(0, listen(server, 1));
+
+	client = unix_named_socket(SOCK_STREAM, clientName);
+	TEST_ASSERT_GREATER_OR_EQUAL_INT(0, client);
+	conn = sockname_connect(server, client, name);
+
+	sockname_expect(getpeername, client, name, "client peer");
+	sockname_expect(getsockname, client, clientName, "client self");
+	sockname_expect(getpeername, conn, clientName, "accepted peer");
+	sockname_expect(getsockname, conn, name, "accepted self");
+
+	close(conn);
+	close(client);
+	close(server);
+	unlink(name);
+	unlink(clientName);
+}
+
+
+TEST(test_unix_sockname, getpeername_dgram)
+{
+	const char *name = "/tmp/sockname_dgram";
+	int server, client;
+
+	server = unix_named_socket(SOCK_DGRAM, name);
+	TEST_ASSERT_GREATER_OR_EQUAL_INT(0, server);
+
+	client = socket(AF_UNIX, SOCK_DGRAM, 0);
+	TEST_ASSERT_GREATER_OR_EQUAL_INT(0, client);
+	TEST_ASSERT_EQUAL_INT(0, connect_to_named(client, name));
+
+	sockname_expect(getpeername, client, name, "dgram peer");
+
+	close(client);
+	close(server);
+	unlink(name);
+}
+
+
+TEST(test_unix_sockname, getpeername_unconnected)
+{
+	const char *name = "/tmp/sockname_listener";
+	struct sockaddr_un addr;
+	socklen_t len;
+	int fd;
+
+	fd = socket(AF_UNIX, SOCK_STREAM, 0);
+	TEST_ASSERT_GREATER_OR_EQUAL_INT(0, fd);
+
+	len = sizeof(addr);
+	errno = 0;
+	TEST_ASSERT_EQUAL_INT(-1, getpeername(fd, (struct sockaddr *)&addr, &len));
+	TEST_ASSERT_EQUAL_INT(ENOTCONN, errno);
+	close(fd);
+
+	/* a listening socket has no peer either */
+	fd = unix_named_socket(SOCK_STREAM, name);
+	TEST_ASSERT_GREATER_OR_EQUAL_INT(0, fd);
+	TEST_ASSERT_EQUAL_INT(0, listen(fd, 1));
+
+	len = sizeof(addr);
+	errno = 0;
+	TEST_ASSERT_EQUAL_INT(-1, getpeername(fd, (struct sockaddr *)&addr, &len));
+	TEST_ASSERT_EQUAL_INT(ENOTCONN, errno);
+
+	close(fd);
+	unlink(name);
+}
+
+
+TEST(test_unix_sockname, truncated)
+{
+	const char *name = "/tmp/sockname_truncated";
+	const socklen_t full = offsetof(struct sockaddr_un, sun_path) + strlen(name) + 1;
+	const socklen_t short_len = offsetof(struct sockaddr_un, sun_path) + 4;
+	struct sockaddr_un addr;
+	unsigned char *raw = (unsigned char *)&addr;
+	socklen_t len;
+	size_t i;
+	int fd;
+
+	fd = unix_named_socket(SOCK_STREAM, name);
+	TEST_ASSERT_GREATER_OR_EQUAL_INT(0, fd);
+
+	/* the address is cut to the buffer, the length is that of the whole address */
+	memset(&addr, SOCKNAME_FILL, sizeof(addr));
+	len = short_len;
+	TEST_ASSERT_EQUAL_INT(0, getsockname(fd, (struct sockaddr *)&addr, &len));
+	TEST_ASSERT_EQUAL_INT(full, len);
+	TEST_ASSERT_EQUAL_INT(AF_UNIX, addr.sun_family);
+	TEST_ASSERT_EQUAL_MEMORY(name, addr.sun_path, 4);
+	for (i = short_len; i < sizeof(addr); i++) {
+		TEST_ASSERT_EQUAL_HEX8_MESSAGE(SOCKNAME_FILL, raw[i], "written past the buffer");
+	}
+
+	/* a zero length buffer is not written at all */
+	memset(&addr, SOCKNAME_FILL, sizeof(addr));
+	len = 0;
+	TEST_ASSERT_EQUAL_INT(0, getsockname(fd, (struct sockaddr *)&addr, &len));
+	TEST_ASSERT_EQUAL_INT(full, len);
+	for (i = 0; i < sizeof(addr); i++) {
+		TEST_ASSERT_EQUAL_HEX8_MESSAGE(SOCKNAME_FILL, raw[i], "written past the buffer");
+	}
+
+	close(fd);
+	unlink(name);
+}
+
+
+TEST(test_unix_sockname, socketpair)
+{
+	int types[] = { SOCK_STREAM, SOCK_DGRAM, SOCK_SEQPACKET };
+	size_t i;
+	int fd[2];
+
+	/* both ends are connected, and neither has a name */
+	for (i = 0; i < sizeof(types) / sizeof(types[0]); i++) {
+		TEST_ASSERT_EQUAL_INT(0, socketpair(AF_UNIX, types[i], 0, fd));
+
+		sockname_expect(getsockname, fd[0], NULL, "socketpair self");
+		sockname_expect(getsockname, fd[1], NULL, "socketpair self");
+		sockname_expect(getpeername, fd[0], NULL, "socketpair peer");
+		sockname_expect(getpeername, fd[1], NULL, "socketpair peer");
+
+		close(fd[0]);
+		close(fd[1]);
+	}
+}
+
+
+TEST_GROUP_RUNNER(test_unix_sockname)
+{
+	RUN_TEST_CASE(test_unix_sockname, getsockname_bound);
+	RUN_TEST_CASE(test_unix_sockname, getsockname_unbound);
+	RUN_TEST_CASE(test_unix_sockname, getpeername_connected);
+	RUN_TEST_CASE(test_unix_sockname, getpeername_bound_client);
+	RUN_TEST_CASE(test_unix_sockname, getpeername_dgram);
+	RUN_TEST_CASE(test_unix_sockname, getpeername_unconnected);
+	RUN_TEST_CASE(test_unix_sockname, truncated);
+	RUN_TEST_CASE(test_unix_sockname, socketpair);
+}
+
+
 void runner(void)
 {
 	RUN_TEST_GROUP(test_unix_socket);
+	RUN_TEST_GROUP(test_unix_sockname);
 }
 
 
