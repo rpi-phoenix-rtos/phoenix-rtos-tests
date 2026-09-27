@@ -30,10 +30,19 @@
  *     how drivers map MMIO) are refused: the call fails with EINVAL and the file
  *     is not changed. The device alias is never touched from user space here:
  *     only the kernel's copies are under test.
+ *   msg_devnext - a payload in ordinary (cacheable) memory at an unaligned offset,
+ *     in the page just BELOW a device mapping, crosses intact. The kernel used to
+ *     look up the payload's mapping with a page-sized probe starting at the
+ *     unaligned address, which also overlaps the mapping above; it could then
+ *     take that mapping's MAP_DEVICE for the payload's own. With the device-payload
+ *     fix alone such a payload may be refused (EINVAL); on a kernel with neither
+ *     fix it may loop a thread at EL1 like group msg_devmem.
  *
  * The incident this reproduces: cycle mig-q3 on the Raspberry Pi 4, a 59-byte
  * write() at page offset 0x49 of a MAP_DEVICE | MAP_UNCACHED page kept
- * pl011-tty's receiving thread in an EL1 alignment-fault loop for 300 s.
+ * pl011-tty's receiving thread in an EL1 alignment-fault loop for 300 s. The
+ * page was in fact ordinary memory - the render server's stdout buffer - with
+ * the server's GPU registers mapped right above it (group msg_devnext).
  *
  * Copyright 2026 Phoenix Systems
  *
@@ -68,6 +77,8 @@
 #define LEN_TAIL    100
 #define OFFS_PACKED 1                   /* small enough to travel inside the message */
 #define LEN_PACKED  20
+#define OFFS_NEXT   0x21                /* mig-q3-fix: a 132-byte line whose first 33 bytes went out */
+#define LEN_NEXT    99
 
 
 static const char devmem_path[] = "/tmp/test-msg-devmem.dat";
@@ -75,6 +86,7 @@ static const char devmem_path[] = "/tmp/test-msg-devmem.dat";
 static struct {
 	char *nc;  /* MAP_UNCACHED: Normal non-cacheable memory */
 	char *dev; /* the same physical pages as nc, mapped as device memory */
+	char *mem; /* msg_devnext: an ordinary page, followed by a device mapping */
 	char pattern[DEVMEM_SIZE];
 	char back[DEVMEM_SIZE];
 } devmem_common;
@@ -131,7 +143,8 @@ static void devmem_readArrives(char *buf, size_t offs, size_t len)
 	TEST_ASSERT_EQUAL_INT((int)len, (int)write(fd, devmem_common.pattern, len));
 	TEST_ASSERT_EQUAL_INT(0, (int)lseek(fd, 0, SEEK_SET));
 
-	memset(buf, 0, DEVMEM_SIZE);
+	/* Only the payload: in group msg_devnext the page above is device memory */
+	memset(buf + offs, 0, len);
 	TEST_ASSERT_EQUAL_INT((int)len, (int)read(fd, buf + offs, len));
 	TEST_ASSERT_EQUAL_MEMORY(devmem_common.pattern, buf + offs, len);
 
@@ -175,6 +188,7 @@ static void devmem_readRefused(size_t offs, size_t len)
 
 TEST_GROUP(msg_uncached);
 TEST_GROUP(msg_devmem);
+TEST_GROUP(msg_devnext);
 
 
 TEST_SETUP(msg_uncached)
@@ -300,6 +314,60 @@ TEST(msg_devmem, read_packed)
 }
 
 
+TEST_SETUP(msg_devnext)
+{
+	addr_t pa;
+
+	devmem_fillPattern();
+
+	/* The physical page behind the device mapping (never touched through it) */
+	devmem_common.nc = mmap(NULL, DEVMEM_PAGE, PROT_READ | PROT_WRITE, MAP_UNCACHED | MAP_CONTIGUOUS | MAP_ANONYMOUS, -1, 0);
+	TEST_ASSERT_NOT_EQUAL(MAP_FAILED, devmem_common.nc);
+	pa = va2pa(devmem_common.nc);
+	TEST_ASSERT_NOT_EQUAL_UINT64(0, (uint64_t)pa);
+
+	/* Two ordinary pages, the second one then replaced by a device mapping */
+	devmem_common.mem = mmap(NULL, DEVMEM_SIZE, PROT_READ | PROT_WRITE, MAP_ANONYMOUS, -1, 0);
+	TEST_ASSERT_NOT_EQUAL(MAP_FAILED, devmem_common.mem);
+	devmem_common.dev = mmap(devmem_common.mem + DEVMEM_PAGE, DEVMEM_PAGE, PROT_READ | PROT_WRITE,
+		MAP_FIXED | MAP_DEVICE | MAP_UNCACHED | MAP_PHYSMEM | MAP_ANONYMOUS, -1, (off_t)pa);
+	TEST_ASSERT_EQUAL_PTR(devmem_common.mem + DEVMEM_PAGE, devmem_common.dev);
+}
+
+
+TEST_TEAR_DOWN(msg_devnext)
+{
+	TEST_ASSERT_EQUAL_INT(0, munmap(devmem_common.mem, DEVMEM_SIZE));
+	TEST_ASSERT_EQUAL_INT(0, munmap(devmem_common.nc, DEVMEM_PAGE));
+	(void)unlink(devmem_path);
+}
+
+
+/* mig-q3-fix: the rest of a stdout line after a short write() to the console */
+TEST(msg_devnext, write_head)
+{
+	devmem_writeArrives(devmem_common.mem, OFFS_NEXT, LEN_NEXT);
+}
+
+
+TEST(msg_devnext, write_packed)
+{
+	devmem_writeArrives(devmem_common.mem, OFFS_PACKED, LEN_PACKED);
+}
+
+
+TEST(msg_devnext, read_head)
+{
+	devmem_readArrives(devmem_common.mem, OFFS_NEXT, LEN_RDHEAD);
+}
+
+
+TEST(msg_devnext, read_packed)
+{
+	devmem_readArrives(devmem_common.mem, OFFS_PACKED, LEN_PACKED);
+}
+
+
 TEST_GROUP_RUNNER(msg_uncached)
 {
 	RUN_TEST_CASE(msg_uncached, write_head);
@@ -323,10 +391,20 @@ TEST_GROUP_RUNNER(msg_devmem)
 }
 
 
+TEST_GROUP_RUNNER(msg_devnext)
+{
+	RUN_TEST_CASE(msg_devnext, write_head);
+	RUN_TEST_CASE(msg_devnext, write_packed);
+	RUN_TEST_CASE(msg_devnext, read_head);
+	RUN_TEST_CASE(msg_devnext, read_packed);
+}
+
+
 static void runner(void)
 {
 	RUN_TEST_GROUP(msg_uncached);
 	RUN_TEST_GROUP(msg_devmem);
+	RUN_TEST_GROUP(msg_devnext);
 }
 
 
