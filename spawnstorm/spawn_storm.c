@@ -229,9 +229,16 @@ static int storm_snapshot(threadinfo_t *snap)
 	 * (threads.c _proc_calculateVmem), unsynchronised against exec replacing
 	 * that map -- the very path under suspicion. */
 	int n = threadsinfo(STORM_MAX_THREADS, PH_THREADINFO_BASIC | PH_THREADINFO_NAME, snap);
+	static int warned = 0;
 
-	if (n > STORM_MAX_THREADS) {
+	/* The kernel stops at the array size and returns that, so a full array may
+	 * have hidden the worker's child -- and a hidden child reads as a HANG. */
+	if (n >= STORM_MAX_THREADS) {
 		n = STORM_MAX_THREADS;
+		if (warned == 0) {
+			warned = 1;
+			storm_say("STORM m warning: %d threads or more, the snapshot is truncated\n", STORM_MAX_THREADS);
+		}
 	}
 
 	return n;
