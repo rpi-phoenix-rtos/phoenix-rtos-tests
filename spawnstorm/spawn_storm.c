@@ -38,9 +38,9 @@
  * hundred launches, with no fault and no status -- and the console was cut
  * mid-line, so the tty driver had stopped draining too. Output that goes
  * through the tty therefore cannot say where the launch stopped. With -t
- * (implied by -f) each step prints a tag through debug(), which the kernel
- * writes straight to the UART; it bypasses the tty server, so a tag is on the
- * wire before the call it announces is made:
+ * (implied by -f; -n turns it off) each step prints a tag through debug(),
+ * which the kernel writes straight to the UART; it bypasses the tty server, so
+ * a tag is on the wire before the call it announces is made:
  *
  *   STORM p fc <i>             parent, about to call fork()/vfork()
  *   STORM p fr <i> <pid>       parent, fork()/vfork() returned
@@ -414,7 +414,7 @@ int main(int argc, char *argv[])
 	pid_t inflight[SPAWN_MAX_PARALLEL];
 	unsigned long slot;
 	pid_t pid;
-	int status, res, devNull, argi = 1, useFork = 0, tags = 0, isWorker = 0;
+	int status, res, devNull, argi = 1, useFork = 0, tags = 0, noTags = 0, isWorker = 0;
 
 	if ((argc > 1) && (strcmp(argv[1], STORM_WORKER_ARG) == 0)) {
 		isWorker = 1;
@@ -448,13 +448,23 @@ int main(int argc, char *argv[])
 			tags = 1;
 			argi += 1;
 		}
+		else if ((argc > argi) && (strcmp(argv[argi], "-n") == 0)) {
+			noTags = 1;
+			argi += 1;
+		}
 		else {
 			break;
 		}
 	}
 
+	/* -n wins over the -t that -f implies, in any order: it is the fallback for
+	 * when the tags' own UART time turns out to hide the hang. */
+	if (noTags != 0) {
+		tags = 0;
+	}
+
 	if (argc < (argi + 2)) {
-		fprintf(stderr, "usage: %s [-f] [-t] [-w <secs>] [-p <parallel>] <iterations> <path> [args...]\n", argv[0]);
+		fprintf(stderr, "usage: %s [-f] [-t|-n] [-w <secs>] [-p <parallel>] <iterations> <path> [args...]\n", argv[0]);
 		return EXIT_FAILURE;
 	}
 
