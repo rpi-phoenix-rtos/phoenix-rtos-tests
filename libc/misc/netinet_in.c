@@ -9,6 +9,7 @@
  * TESTED:
  *    - struct ipv6_mreq (ipv6mr_multiaddr, ipv6mr_interface)
  *    - IPV6_JOIN_GROUP, IPV6_LEAVE_GROUP, IPV6_V6ONLY
+ *    - IN6_IS_ADDR_MC_* (argument expressions, scope nibble with flag bits set)
  *
  * struct ipv6_mreq was missing, so every IPv6 multicast user carried its own
  * copy. Mostly a compile test: if the struct or a member is absent, this file
@@ -88,8 +89,42 @@ TEST(netinet_in_ipv6_mreq, option_numbers)
 }
 
 
+TEST(netinet_in_ipv6_mreq, mc_scope)
+{
+	struct {
+		int pad;
+		struct in6_addr addr;
+	} s;
+
+	/* ff02::1: link-local scope, no flags. The argument is an expression, so the
+	 * macro must parenthesise it (`&s.addr` failed to compile before). */
+	memset(&s, 0, sizeof(s));
+	s.addr.s6_addr[0] = 0xff;
+	s.addr.s6_addr[1] = 0x02;
+	s.addr.s6_addr[15] = 1;
+	TEST_ASSERT_TRUE(IN6_IS_ADDR_MC_LINKLOCAL(&s.addr));
+	TEST_ASSERT_FALSE(IN6_IS_ADDR_MC_GLOBAL(&s.addr));
+
+	/* ff12::1: the same scope with the T (transient) flag set in the high nibble
+	 * (RFC 4291 2.7): still link-local */
+	s.addr.s6_addr[1] = 0x12;
+	TEST_ASSERT_TRUE(IN6_IS_ADDR_MC_LINKLOCAL(&s.addr));
+
+	/* ff1e::1: global scope with a flag */
+	s.addr.s6_addr[1] = 0x1e;
+	TEST_ASSERT_TRUE(IN6_IS_ADDR_MC_GLOBAL(&s.addr));
+	TEST_ASSERT_FALSE(IN6_IS_ADDR_MC_LINKLOCAL(&s.addr));
+
+	/* not multicast at all */
+	s.addr.s6_addr[0] = 0xfe;
+	s.addr.s6_addr[1] = 0x80;
+	TEST_ASSERT_FALSE(IN6_IS_ADDR_MC_LINKLOCAL(&s.addr));
+}
+
+
 TEST_GROUP_RUNNER(netinet_in_ipv6_mreq)
 {
 	RUN_TEST_CASE(netinet_in_ipv6_mreq, members);
 	RUN_TEST_CASE(netinet_in_ipv6_mreq, option_numbers);
+	RUN_TEST_CASE(netinet_in_ipv6_mreq, mc_scope);
 }
