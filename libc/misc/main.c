@@ -43,6 +43,7 @@ void runner(void)
 	RUN_TEST_GROUP(assert_static);
 	RUN_TEST_GROUP(sys_file_flock);
 	RUN_TEST_GROUP(unistd_sysconf_mem);
+	RUN_TEST_GROUP(netinet_in_ipv6_mreq);
 #ifdef __phoenix__
 	/* tests libphoenix internal functions */
 	RUN_TEST_GROUP(unistd_file_safe);
