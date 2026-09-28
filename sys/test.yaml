@@ -7,6 +7,9 @@ test:
     - name: cond
       execute: test-sys-cond
 
+    - name: threadinfo
+      execute: test-sys-threadinfo
+
     - name: perf
       execute: test-sys-perf
       targets:
