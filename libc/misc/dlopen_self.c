@@ -26,6 +26,9 @@
 
 #include <dlfcn.h>
 #include <stddef.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
 
 #include <unity_fixture.h>
 
@@ -100,4 +103,100 @@ TEST_GROUP_RUNNER(dlopen_self)
 	RUN_TEST_CASE(dlopen_self, open_null_is_stable);
 	RUN_TEST_CASE(dlopen_self, sym_missing_reports_error);
 	RUN_TEST_CASE(dlopen_self, bad_args);
+}
+
+
+/* dladdr(): which object and symbol an address belongs to. The test program may be stripped
+   (dli_sname is then NULL), so a symbol name is checked only when one is reported; the object
+   itself must always be found for an address inside the program. */
+
+TEST_GROUP(dladdr_self);
+
+
+TEST_SETUP(dladdr_self)
+{
+}
+
+
+TEST_TEAR_DOWN(dladdr_self)
+{
+}
+
+
+/* a sized function of this program: its entry and an address inside it */
+static int dladdr_self_probe(int x)
+{
+	return (x * 3) + 1;
+}
+
+
+TEST(dladdr_self, function_in_program)
+{
+	Dl_info info;
+	const void *fn = (const void *)(uintptr_t)dladdr_self_probe;
+
+	TEST_ASSERT_EQUAL_INT(7, dladdr_self_probe(2));
+	memset(&info, 0xa5, sizeof(info));
+	TEST_ASSERT_NOT_EQUAL(0, dladdr(fn, &info));
+	TEST_ASSERT_NOT_NULL(info.dli_fname);
+	TEST_ASSERT_TRUE((uintptr_t)info.dli_fbase <= (uintptr_t)fn);
+	if (info.dli_sname != NULL) {
+		TEST_ASSERT_EQUAL_STRING("dladdr_self_probe", info.dli_sname);
+		TEST_ASSERT_EQUAL_PTR(fn, info.dli_saddr);
+	}
+	else {
+		TEST_ASSERT_NULL(info.dli_saddr);
+	}
+}
+
+
+TEST(dladdr_self, inside_function_names_it)
+{
+	Dl_info info;
+	const char *fn = (const char *)(uintptr_t)dladdr_self_probe;
+
+	TEST_ASSERT_NOT_EQUAL(0, dladdr(fn + 4, &info));
+	if (info.dli_sname != NULL) {
+		TEST_ASSERT_EQUAL_STRING("dladdr_self_probe", info.dli_sname);
+		TEST_ASSERT_EQUAL_PTR(fn, info.dli_saddr);
+	}
+}
+
+
+TEST(dladdr_self, libc_function_in_program)
+{
+	Dl_info info;
+	const void *fn = (const void *)(uintptr_t)strlen;
+
+	TEST_ASSERT_NOT_EQUAL(0, dladdr(fn, &info));
+	TEST_ASSERT_NOT_NULL(info.dli_fname);
+	if (info.dli_sname != NULL) {
+		TEST_ASSERT_EQUAL_PTR(fn, info.dli_saddr);
+	}
+}
+
+
+/* heap, stack and NULL lie in no object: 0, and dli_* untouched as NULL */
+TEST(dladdr_self, outside_every_object)
+{
+	Dl_info info;
+	int local = 0;
+	void *heap = malloc(64);
+
+	TEST_ASSERT_NOT_NULL(heap);
+	TEST_ASSERT_EQUAL_INT(0, dladdr(heap, &info));
+	TEST_ASSERT_NULL(info.dli_fname);
+	TEST_ASSERT_EQUAL_INT(0, dladdr(&local, &info));
+	TEST_ASSERT_EQUAL_INT(0, dladdr(NULL, &info));
+	TEST_ASSERT_EQUAL_INT(0, dladdr((const void *)(uintptr_t)dladdr_self_probe, NULL));
+	free(heap);
+}
+
+
+TEST_GROUP_RUNNER(dladdr_self)
+{
+	RUN_TEST_CASE(dladdr_self, function_in_program);
+	RUN_TEST_CASE(dladdr_self, inside_function_names_it);
+	RUN_TEST_CASE(dladdr_self, libc_function_in_program);
+	RUN_TEST_CASE(dladdr_self, outside_every_object);
 }
