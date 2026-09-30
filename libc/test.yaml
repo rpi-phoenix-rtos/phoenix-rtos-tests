@@ -109,6 +109,18 @@ test:
       targets:
         value: [ia32-generic-qemu, armv7a7-imx6ull-evk, host-generic-pc]
 
+    # Needs the network stack (lwip) and the shipped /etc/hosts
+    - name: netdb
+      execute: test-libc-netdb
+      targets:
+        value: [ia32-generic-qemu, armv7a7-imx6ull-evk, host-generic-pc]
+
+    # fork() + pthreads: MMU targets only
+    - name: sa_restart
+      execute: test-libc-sa_restart
+      targets:
+        value: [ia32-generic-qemu, armv7a7-imx6ull-evk, host-generic-pc]
+
     - name: dirent
       execute: test-libc-dirent
       targets:
