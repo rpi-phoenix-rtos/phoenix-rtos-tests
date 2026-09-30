@@ -310,6 +310,37 @@ TEST(test_inet_socket, socket_mixed_family_and_type)
 }
 
 
+/* An AF_INET6 socket is either refused with EAFNOSUPPORT -- which lets the
+ * caller fall back to AF_INET -- or is a real IPv6 socket that accepts a
+ * sockaddr_in6. lwip built without IPv6 used to hand back an IPv4 socket that
+ * failed the first IPv6 call with EIO (vkQuake: "UDP6_OpenSocket:
+ * Input/output error"). */
+TEST(test_inet_socket, inet6_supported_or_eafnosupport)
+{
+	struct sockaddr_in6 addr = { 0 };
+	struct sockaddr_in6 got = { 0 };
+	socklen_t len = sizeof(got);
+	int fd;
+
+	errno = 0;
+	fd = socket(AF_INET6, SOCK_DGRAM, 0);
+	if (fd < 0) {
+		TEST_ASSERT_EQUAL_INT(EAFNOSUPPORT, errno);
+		return;
+	}
+
+	addr.sin6_family = AF_INET6;
+	addr.sin6_port = 0;
+	addr.sin6_addr = in6addr_any;
+	TEST_ASSERT_EQUAL_INT_MESSAGE(0, bind(fd, (struct sockaddr *)&addr, sizeof(addr)),
+		"socket(AF_INET6) succeeded but the socket rejects a sockaddr_in6");
+	TEST_ASSERT_EQUAL_INT(0, getsockname(fd, (struct sockaddr *)&got, &len));
+	TEST_ASSERT_EQUAL_INT(AF_INET6, got.sin6_family);
+
+	TEST_ASSERT_EQUAL_INT(0, close(fd));
+}
+
+
 TEST(test_inet_socket, socket_bad_args_do_not_poison)
 {
 	int bad, good;
@@ -399,6 +430,7 @@ TEST_GROUP_RUNNER(test_inet_socket)
 	RUN_TEST_CASE(test_inet_socket, getaddrinfo_numeric_and_passive);
 	RUN_TEST_CASE(test_inet_socket, socket_many_sequential);
 	RUN_TEST_CASE(test_inet_socket, socket_mixed_family_and_type);
+	RUN_TEST_CASE(test_inet_socket, inet6_supported_or_eafnosupport);
 	RUN_TEST_CASE(test_inet_socket, socket_bad_args_do_not_poison);
 	RUN_TEST_CASE(test_inet_socket, bind_ephemeral_reports_a_port);
 	RUN_TEST_CASE(test_inet_socket, udp_loopback_roundtrip);
