@@ -57,3 +57,11 @@ $(eval $(call add_test_libc,execinfo,, -fno-omit-frame-pointer))
 # the test IS stack-protected code: it does not link without the libc's __stack_chk_* runtime
 $(eval $(call add_test_libc,stack-protector,, -fstack-protector-strong))
 $(eval $(call add_test_libc,malloc-mt, -lpthread))
+
+# Not a unity test: prints the cost of a malloc(64)+free() pair while the process
+# is single-threaded (heap lock skipped) and after it has started a thread
+NAME := bench-malloc
+SRCS := $(MY_LOCAL_DIR)bench-malloc/bench_malloc.c
+LOCAL_LDFLAGS := -lpthread
+
+include $(binary.mk)
