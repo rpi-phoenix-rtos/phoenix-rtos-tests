@@ -127,11 +127,91 @@ TEST(test_mprotect, pages_in_parent_copied)
 }
 
 
+/* Stores to addr in a child: a store to a page mprotect() left read-only kills
+ * the child, and the parent then fails the test instead of dying itself. */
+static void assert_child_writes(volatile unsigned char *addr)
+{
+	pid_t pid = fork();
+	TEST_ASSERT(pid >= 0);
+	if (pid == 0) {
+		*addr = 0x5a;
+		_exit((*addr == 0x5a) ? 0 : 1);
+	}
+
+	int status;
+	TEST_ASSERT_EQUAL_INT(pid, waitpid(pid, &status, 0));
+	TEST_ASSERT_FALSE_MESSAGE(WIFSIGNALED(status), "store faulted: page is not writable");
+	TEST_ASSERT_TRUE(WIFEXITED(status));
+	TEST_ASSERT_EQUAL_INT(0, WEXITSTATUS(status));
+}
+
+
+/* POSIX: addr must be page-aligned, len need not be a page multiple -- the
+ * call covers every page the range touches. Phoenix used to fail such a call
+ * with EINVAL (quake3's JIT: "mprotect(RX) failed"). */
+TEST(test_mprotect, unaligned_len_covers_last_page)
+{
+	unsigned char *area = mmap(NULL, page_size * 3, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+	TEST_ASSERT(area != MAP_FAILED);
+	area[0] = area[page_size] = area[2 * page_size] = 0x42;
+
+	TEST_ASSERT_EQUAL_INT(0, mprotect(area, page_size * 3, PROT_READ));
+
+	/* One byte into page 1: pages 0 and 1 become writable, all of page 1. */
+	TEST_ASSERT_EQUAL_INT(0, mprotect(area, page_size + 1, PROT_READ | PROT_WRITE));
+	assert_child_writes(area);
+	assert_child_writes(area + page_size);
+	assert_child_writes(area + (2 * page_size) - 1);
+
+	TEST_ASSERT_EQUAL_INT(0x42, area[page_size]);
+	TEST_ASSERT_EQUAL_INT(0, munmap(area, page_size * 3));
+}
+
+
+/* ...and only those pages: the rounding must not reach the next one. */
+TEST(test_mprotect, unaligned_len_stops_at_last_page)
+{
+	unsigned char *area = mmap(NULL, page_size * 3, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+	TEST_ASSERT(area != MAP_FAILED);
+	area[0] = area[page_size] = area[2 * page_size] = 0x42;
+
+	TEST_ASSERT_EQUAL_INT(0, mprotect(area, page_size + 1, PROT_READ));
+	assert_child_writes(area + (2 * page_size));
+	TEST_ASSERT_EQUAL_INT(0x42, area[page_size]);
+
+	TEST_ASSERT_EQUAL_INT(0, mprotect(area, (2 * page_size) - 1, PROT_READ | PROT_WRITE));
+	assert_child_writes(area + (2 * page_size) - 1);
+
+	TEST_ASSERT_EQUAL_INT(0, munmap(area, page_size * 3));
+}
+
+
+TEST(test_mprotect, args)
+{
+	unsigned char *area = mmap(NULL, page_size, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+	TEST_ASSERT(area != MAP_FAILED);
+
+	/* An unaligned addr is the one alignment error POSIX specifies. */
+	errno = 0;
+	TEST_ASSERT_EQUAL_INT(-1, mprotect(area + 1, page_size - 1, PROT_READ));
+	TEST_ASSERT_EQUAL_INT(EINVAL, errno);
+
+	/* An empty range touches no page; not an error (as on Linux and the BSDs). */
+	TEST_ASSERT_EQUAL_INT(0, mprotect(area, 0, PROT_READ));
+	assert_child_writes(area);
+
+	TEST_ASSERT_EQUAL_INT(0, munmap(area, page_size));
+}
+
+
 TEST_GROUP_RUNNER(test_mprotect)
 {
 	RUN_TEST_CASE(test_mprotect, test_mprotect_singlecore);
 	RUN_TEST_CASE(test_mprotect, pages_in_child_copied);
 	RUN_TEST_CASE(test_mprotect, pages_in_parent_copied);
+	RUN_TEST_CASE(test_mprotect, unaligned_len_covers_last_page);
+	RUN_TEST_CASE(test_mprotect, unaligned_len_stops_at_last_page);
+	RUN_TEST_CASE(test_mprotect, args);
 }
 
 
