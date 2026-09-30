@@ -9,6 +9,7 @@
  *    - strerror()
  *    - strerror_r()
  *    - strsignal()
+ *    - gai_strerror() (netdb.h)
  *
  * Copyright 2023 Phoenix Systems
  * Author: Mateusz Bloch
@@ -24,6 +25,7 @@
 #include <signal.h>
 #include <limits.h>
 #include <unistd.h>
+#include <netdb.h>
 #include <unity_fixture.h>
 
 /* Typical error message does not exceed ~60 characters, that's why we expect a maximum value a little bit bigger */
@@ -183,6 +185,46 @@ TEST(string_errsign, strsignal_real_time)
 }
 
 
+/* Every EAI_* code must map to a message. The table used to be generated
+ * empty (its generator missed `#define EAI_X -N`), so gai_strerror() returned
+ * "Unknown error N" for all of them. */
+static const int gai_codes[] = { EAI_BADFLAGS, EAI_NONAME, EAI_AGAIN, EAI_FAIL, EAI_FAMILY, EAI_SOCKTYPE,
+	EAI_SERVICE, EAI_MEMORY, EAI_SYSTEM, EAI_OVERFLOW };
+
+
+TEST(string_errsign, gai_strerror_text)
+{
+	/* Texts as glibc's, which POSIX leaves to the implementation. */
+	TEST_ASSERT_EQUAL_STRING("Bad value for ai_flags", gai_strerror(EAI_BADFLAGS));
+	TEST_ASSERT_EQUAL_STRING("Name or service not known", gai_strerror(EAI_NONAME));
+	TEST_ASSERT_EQUAL_STRING("Temporary failure in name resolution", gai_strerror(EAI_AGAIN));
+	TEST_ASSERT_EQUAL_STRING("Non-recoverable failure in name resolution", gai_strerror(EAI_FAIL));
+	TEST_ASSERT_EQUAL_STRING("ai_family not supported", gai_strerror(EAI_FAMILY));
+	TEST_ASSERT_EQUAL_STRING("Memory allocation failure", gai_strerror(EAI_MEMORY));
+	TEST_ASSERT_EQUAL_STRING("System error", gai_strerror(EAI_SYSTEM));
+}
+
+
+TEST(string_errsign, gai_strerror_all)
+{
+	const unsigned int n = sizeof(gai_codes) / sizeof(gai_codes[0]);
+
+	for (unsigned int i = 0; i < n; i++) {
+		const char *msg = gai_strerror(gai_codes[i]);
+
+		TEST_ASSERT_NOT_NULL(msg);
+		TEST_ASSERT_NOT_EQUAL_INT(0, strlen(msg));
+		TEST_ASSERT_NULL(strstr(msg, "Unknown error"));
+		/* The message is not the macro name. */
+		TEST_ASSERT_NULL(strstr(msg, "EAI_"));
+
+		for (unsigned int j = 0; j < i; j++) {
+			TEST_ASSERT_NOT_EQUAL_INT(0, strcmp(gai_strerror(gai_codes[j]), msg));
+		}
+	}
+}
+
+
 TEST_GROUP_RUNNER(string_errsign)
 {
 	RUN_TEST_CASE(string_errsign, strerror_basic);
@@ -196,4 +238,7 @@ TEST_GROUP_RUNNER(string_errsign)
 
 	RUN_TEST_CASE(string_errsign, strsignal_basic);
 	RUN_TEST_CASE(string_errsign, strsignal_real_time);
+
+	RUN_TEST_CASE(string_errsign, gai_strerror_text);
+	RUN_TEST_CASE(string_errsign, gai_strerror_all);
 }
