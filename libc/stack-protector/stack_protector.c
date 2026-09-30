@@ -19,6 +19,7 @@
  */
 
 #include <errno.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -192,6 +193,11 @@ TEST(stack_protector, overflow_aborts)
 	}
 
 	close(fds[1]);
+
+	/* Reap first, then drain without blocking: the message fits in the pipe, and a
+	 * missing EOF from a signal-killed writer must not hang the test. */
+	status = sp_wait(pid);
+	(void)fcntl(fds[0], F_SETFL, O_NONBLOCK);
 	while (len < sizeof(msg) - 1) {
 		n = read(fds[0], msg + len, sizeof(msg) - 1 - len);
 		if (n < 0 && errno == EINTR) {
@@ -205,7 +211,6 @@ TEST(stack_protector, overflow_aborts)
 	msg[len] = '\0';
 	close(fds[0]);
 
-	status = sp_wait(pid);
 	TEST_ASSERT_FALSE_MESSAGE(WIFEXITED(status) && (WEXITSTATUS(status) == 3), "overflow not detected");
 	TEST_ASSERT_TRUE_MESSAGE(WIFSIGNALED(status), "child not killed by a signal");
 	TEST_ASSERT_EQUAL_INT(SIGABRT, WTERMSIG(status));
