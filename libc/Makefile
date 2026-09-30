@@ -52,3 +52,5 @@ $(eval $(call add_test_libc,dirent, -lpthread))
 $(eval $(call add_test_libc,statvfs))
 # -fno-omit-frame-pointer: backtrace() walks frame records; the tree default omits them
 $(eval $(call add_test_libc,execinfo,, -fno-omit-frame-pointer))
+# the test IS stack-protected code: it does not link without the libc's __stack_chk_* runtime
+$(eval $(call add_test_libc,stack-protector,, -fstack-protector-strong))

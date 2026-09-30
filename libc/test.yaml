@@ -129,3 +129,18 @@ test:
         include: [host-generic-pc]
         # backtrace_symbols_fd() is read back through pipe(), served by posixsrv
         exclude: [armv7r5f-zynqmp-qemu, armv8m33-mcxn94x-frdm, armv8m33-mcxn94x-frdm_cpu1]
+
+    - name: stack-protector
+      execute: test-libc-stack-protector
+      targets:
+        include: [host-generic-pc]
+        # fork() (NOMMU targets lack it) and the child's stderr read back through pipe(), served by posixsrv
+        exclude: [
+          armv7m7-imxrt106x-evk,
+          armv7m7-imxrt117x-evk,
+          armv7m4-stm32l4x6-nucleo,
+          armv8m33-mcxn94x-frdm,
+          armv8m33-mcxn94x-frdm_cpu1,
+          armv7r5f-zynqmp-qemu,
+          armv8m55-stm32n6-nucleo,
+          ]
