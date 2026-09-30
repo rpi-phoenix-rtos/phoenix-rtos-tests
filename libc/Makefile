@@ -49,6 +49,7 @@ $(eval $(call add_test_libc_custom,socket,inet-socket,, -Wno-attribute-warning, 
 $(eval $(call add_test_libc_custom,socket,unix-socket,, -Wno-attribute-warning, unix-socket.c common.c))
 $(eval $(call add_test_libc,poll))
 $(eval $(call add_test_libc,netdb))
+$(eval $(call add_test_libc,sa_restart, -lpthread))
 $(eval $(call add_test_libc,dirent, -lpthread))
 $(eval $(call add_test_libc,statvfs))
 # -fno-omit-frame-pointer: backtrace() walks frame records; the tree default omits them
