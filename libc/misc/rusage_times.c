@@ -48,6 +48,28 @@ TEST(misc_rusage_times, getrusage_defines_out_param)
 }
 
 
+/* The BSD/Linux members exist, are defined, and nothing past the struct is
+ * written */
+TEST(misc_rusage_times, getrusage_bsd_members)
+{
+	struct {
+		struct rusage ru;
+		unsigned long canary;
+	} buf;
+
+	memset(&buf, 0xaa, sizeof(buf));
+	TEST_ASSERT_EQUAL_INT(0, getrusage(RUSAGE_SELF, &buf.ru));
+	TEST_ASSERT_EQUAL_INT64(0, buf.ru.ru_maxrss);
+	TEST_ASSERT_EQUAL_INT64(0, buf.ru.ru_minflt);
+	TEST_ASSERT_EQUAL_INT64(0, buf.ru.ru_majflt);
+	TEST_ASSERT_EQUAL_INT64(0, buf.ru.ru_inblock);
+	TEST_ASSERT_EQUAL_INT64(0, buf.ru.ru_oublock);
+	TEST_ASSERT_EQUAL_INT64(0, buf.ru.ru_nvcsw);
+	TEST_ASSERT_EQUAL_INT64(0, buf.ru.ru_nivcsw);
+	TEST_ASSERT_EQUAL_HEX64(0xaaaaaaaaaaaaaaaaull & (unsigned long)-1, buf.canary);
+}
+
+
 TEST(misc_rusage_times, getrusage_null_efault)
 {
 	errno = 0;
@@ -87,6 +109,7 @@ TEST(misc_rusage_times, times_returns_defined)
 TEST_GROUP_RUNNER(misc_rusage_times)
 {
 	RUN_TEST_CASE(misc_rusage_times, getrusage_defines_out_param);
+	RUN_TEST_CASE(misc_rusage_times, getrusage_bsd_members);
 	RUN_TEST_CASE(misc_rusage_times, getrusage_null_efault);
 	RUN_TEST_CASE(misc_rusage_times, times_returns_defined);
 }
