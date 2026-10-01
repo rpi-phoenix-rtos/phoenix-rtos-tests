@@ -29,6 +29,7 @@ void runner(void)
 	RUN_TEST_GROUP(pthread_canceltype);
 	RUN_TEST_GROUP(pthread_barrier);
 	RUN_TEST_GROUP(pthread_getattr);
+	RUN_TEST_GROUP(pthread_cond_eintr);
 }
 
 
