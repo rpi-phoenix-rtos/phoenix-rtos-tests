@@ -28,6 +28,7 @@ void runner(void)
 	RUN_TEST_GROUP(sigsuspend);
 	RUN_TEST_GROUP(liveness);
 	RUN_TEST_GROUP(siginfo);
+	RUN_TEST_GROUP(sigaltstack);
 }
 
 
