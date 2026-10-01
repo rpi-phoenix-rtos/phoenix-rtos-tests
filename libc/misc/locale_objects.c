@@ -233,10 +233,17 @@ TEST(locale_objects, time_and_langinfo_l)
 }
 
 
+/* POSIX requires LC_MESSAGES: setlocale() and newlocale() take it */
 TEST(locale_objects, setlocale_messages)
 {
+	locale_t loc;
+
 	TEST_ASSERT_NOT_NULL(setlocale(LC_MESSAGES, "C"));
 	TEST_ASSERT_NOT_NULL(setlocale(LC_MESSAGES, NULL));
+
+	loc = newlocale(LC_MESSAGES_MASK, "C", (locale_t)0);
+	TEST_ASSERT_NOT_NULL(loc);
+	freelocale(loc);
 }
 
 
