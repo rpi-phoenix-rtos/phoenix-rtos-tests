@@ -27,6 +27,7 @@ void runner(void)
 	RUN_TEST_GROUP(time_strptime);
 	RUN_TEST_GROUP(time_clock);
 	RUN_TEST_GROUP(time_tz);
+	RUN_TEST_GROUP(time_tm_zone);
 }
 
 

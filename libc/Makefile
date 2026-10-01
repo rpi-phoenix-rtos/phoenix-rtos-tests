@@ -59,6 +59,8 @@ $(eval $(call add_test_libc,stack-protector,, -fstack-protector-strong))
 $(eval $(call add_test_libc,malloc-mt, -lpthread))
 $(eval $(call add_test_libc,pthread-fork, -lpthread))
 $(eval $(call add_test_libc,mutex, -lpthread))
+# the test binary spawns itself as the child
+$(eval $(call add_test_libc,spawn, -lpthread))
 
 # Not a unity test: prints the cost of a malloc(64)+free() pair while the process
 # is single-threaded (heap lock skipped) and after it has started a thread

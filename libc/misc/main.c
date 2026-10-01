@@ -44,6 +44,10 @@ void runner(void)
 	RUN_TEST_GROUP(sys_file_flock);
 	RUN_TEST_GROUP(unistd_sysconf_mem);
 	RUN_TEST_GROUP(netinet_in_ipv6_mreq);
+	RUN_TEST_GROUP(mman_advise);
+	RUN_TEST_GROUP(unistd_pipe2);
+	RUN_TEST_GROUP(locale_objects);
+	RUN_TEST_GROUP(misc_uchar);
 #ifdef __phoenix__
 	/* tests libphoenix internal functions */
 	RUN_TEST_GROUP(unistd_file_safe);
