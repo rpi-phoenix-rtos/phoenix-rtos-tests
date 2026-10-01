@@ -900,6 +900,95 @@ TEST(sigaction, sigaction_in_handler_default)
 }
 
 
+/* SA_RESETHAND: the handler runs once, then the disposition is SIG_DFL. Without
+ * SA_NODEFER the signal is still blocked inside that one handler call (POSIX
+ * allows, but does not require, SA_RESETHAND to imply SA_NODEFER; Linux and
+ * Phoenix keep them independent). */
+TEST(sigaction, resethand_resets_disposition)
+{
+	sigset_t empty, set;
+	TEST_ASSERT_EQUAL_INT(0, sigemptyset(&empty));
+
+	struct sigaction act = {
+		.sa_handler = sighandler,
+		.sa_flags = SA_RESETHAND,
+		.sa_mask = empty,
+	};
+	struct sigaction old;
+
+	TEST_ASSERT_EQUAL_INT(0, sigaction(SIGUSR1, &act, NULL));
+	TEST_ASSERT_EQUAL_INT(0, sigaction(SIGUSR1, NULL, &old));
+	TEST_ASSERT_EQUAL_PTR(sighandler, old.sa_handler);
+
+	TEST_ASSERT_EQUAL_INT(0, raise(SIGUSR1));
+	TEST_ASSERT_EQUAL_HEX32((1u << SIGUSR1), handler_haveSignal);
+	set = handler_sigset;
+	TEST_ASSERT_EQUAL_INT(1, sigismember(&set, SIGUSR1));
+
+	TEST_ASSERT_EQUAL_INT(0, sigaction(SIGUSR1, NULL, &old));
+	TEST_ASSERT_EQUAL_PTR(SIG_DFL, old.sa_handler);
+}
+
+
+TEST(sigaction, resethand_nodefer)
+{
+	sigset_t empty, set;
+	TEST_ASSERT_EQUAL_INT(0, sigemptyset(&empty));
+
+	struct sigaction act = {
+		.sa_handler = sighandler,
+		.sa_flags = SA_RESETHAND | SA_NODEFER,
+		.sa_mask = empty,
+	};
+	struct sigaction old;
+
+	TEST_ASSERT_EQUAL_INT(0, sigaction(SIGUSR1, &act, NULL));
+	TEST_ASSERT_EQUAL_INT(0, raise(SIGUSR1));
+	TEST_ASSERT_EQUAL_HEX32((1u << SIGUSR1), handler_haveSignal);
+	set = handler_sigset;
+	TEST_ASSERT_EQUAL_INT(0, sigismember(&set, SIGUSR1));
+
+	TEST_ASSERT_EQUAL_INT(0, sigaction(SIGUSR1, NULL, &old));
+	TEST_ASSERT_EQUAL_PTR(SIG_DFL, old.sa_handler);
+}
+
+
+/* The second delivery takes the default action: SIGUSR1 terminates. */
+TEST(sigaction, resethand_second_delivery_default)
+{
+	sigset_t empty;
+	TEST_ASSERT_EQUAL_INT(0, sigemptyset(&empty));
+
+	pid_t pid = safe_fork();
+	TEST_ASSERT_GREATER_OR_EQUAL(0, pid);
+	if (pid > 0) {
+		int code;
+		TEST_ASSERT_EQUAL_INT(pid, waitpid(pid, &code, 0));
+		/* exit status 1: handler never ran; 2: the second raise was handled too */
+		TEST_ASSERT_FALSE_MESSAGE(WIFEXITED(code) && (WEXITSTATUS(code) == 1), "SA_RESETHAND handler did not run");
+		TEST_ASSERT_FALSE_MESSAGE(WIFEXITED(code) && (WEXITSTATUS(code) == 2), "second signal was handled, not defaulted");
+		TEST_ASSERT_EQUAL_INT(true, WIFSIGNALED(code));
+		TEST_ASSERT_EQUAL_INT(SIGUSR1, WTERMSIG(code));
+	}
+	else {
+		struct sigaction act = {
+			.sa_handler = sighandler,
+			.sa_flags = SA_RESETHAND,
+			.sa_mask = empty,
+		};
+		handler_haveSignal = 0u;
+		sigaction(SIGUSR1, &act, NULL);
+		raise(SIGUSR1);
+		if (handler_haveSignal != (1u << SIGUSR1)) {
+			_exit(1);
+		}
+		handler_haveSignal = 0u;
+		raise(SIGUSR1);
+		_exit(2);
+	}
+}
+
+
 TEST_GROUP_RUNNER(sigaction)
 {
 	RUN_TEST_CASE(sigaction, signal_termination_statuscode);
@@ -927,4 +1016,8 @@ TEST_GROUP_RUNNER(sigaction)
 	RUN_TEST_CASE(sigaction, sigaction_in_handler_nodefer_handle_reraise);
 	RUN_TEST_CASE(sigaction, sigaction_in_handler_ignore);
 	RUN_TEST_CASE(sigaction, sigaction_in_handler_default);
+
+	RUN_TEST_CASE(sigaction, resethand_resets_disposition);
+	RUN_TEST_CASE(sigaction, resethand_nodefer);
+	RUN_TEST_CASE(sigaction, resethand_second_delivery_default);
 }
