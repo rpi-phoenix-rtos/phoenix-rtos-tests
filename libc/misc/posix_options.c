@@ -199,11 +199,11 @@ TEST(posix_options, claims_are_backed_by_callable_functions)
 /* The other half of the contract: groups libphoenix does NOT implement must stay
  * unclaimed, so portable code keeps taking its fallback instead of calling a
  * function that is not there. Each of these is absent for a checked reason --
- * no sem_* and no <semaphore.h>, no posix_spawn, no shm_open, no
- * sigqueue/sigwaitinfo, no mq_*, no clock_getcpuclockid. _POSIX_BARRIERS is
- * the exception: pthread_barrier_* now exist (process-private only), but
- * claiming the option changes which path ports take and is left for a
- * deliberate decision -- until then it must stay unclaimed. */
+ * no sem_* and no <semaphore.h>, no shm_open, no sigqueue/sigwaitinfo, no
+ * mq_*, no clock_getcpuclockid. _POSIX_BARRIERS and _POSIX_SPAWN are the
+ * exceptions: pthread_barrier_* (process-private only) and posix_spawn() now
+ * exist, but claiming an option changes which path ports take and is left for
+ * a deliberate decision -- until then they must stay unclaimed. */
 TEST(posix_options, unimplemented_groups_stay_unclaimed)
 {
 #ifdef _POSIX_SEMAPHORES
@@ -213,7 +213,7 @@ TEST(posix_options, unimplemented_groups_stay_unclaimed)
 	TEST_FAIL_MESSAGE("_POSIX_BARRIERS claimed: pthread_barrier_* exist, but claiming the option is a separate decision");
 #endif
 #ifdef _POSIX_SPAWN
-	TEST_FAIL_MESSAGE("_POSIX_SPAWN claimed but libphoenix has no posix_spawn");
+	TEST_FAIL_MESSAGE("_POSIX_SPAWN claimed: posix_spawn() exists, but claiming the option is a separate decision");
 #endif
 #ifdef _POSIX_SHARED_MEMORY_OBJECTS
 	TEST_FAIL_MESSAGE("_POSIX_SHARED_MEMORY_OBJECTS claimed but libphoenix has no shm_open");
