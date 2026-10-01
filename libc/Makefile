@@ -58,11 +58,21 @@ $(eval $(call add_test_libc,execinfo,, -fno-omit-frame-pointer))
 $(eval $(call add_test_libc,stack-protector,, -fstack-protector-strong))
 $(eval $(call add_test_libc,malloc-mt, -lpthread))
 $(eval $(call add_test_libc,pthread-fork, -lpthread))
+$(eval $(call add_test_libc,mutex, -lpthread))
 
 # Not a unity test: prints the cost of a malloc(64)+free() pair while the process
 # is single-threaded (heap lock skipped) and after it has started a thread
 NAME := bench-malloc
 SRCS := $(MY_LOCAL_DIR)bench-malloc/bench_malloc.c
+LOCAL_LDFLAGS := -lpthread
+
+include $(binary.mk)
+
+
+# Not a unity test: prints the cost of uncontended and contended locks, of a
+# multithreaded malloc(64)+free() pair and of a condition-variable round trip
+NAME := bench-mutex
+SRCS := $(MY_LOCAL_DIR)bench-mutex/bench_mutex.c
 LOCAL_LDFLAGS := -lpthread
 
 include $(binary.mk)
