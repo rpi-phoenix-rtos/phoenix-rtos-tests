@@ -35,6 +35,8 @@
 #include <poll.h>
 #include <sys/select.h>
 #include <sys/uio.h>
+#include <sys/ioctl.h>
+#include <termios.h>
 #include <sys/wait.h>
 
 #include "common.h"
@@ -3063,6 +3065,87 @@ TEST(test_unix_socket, peercred_socketpair)
 }
 
 
+/* Expects `fd` to be empty and (non-)blocking as `nonblock` says, and to read what its peer sends. */
+static void unix_nonblock_expect(int fd, int peer, int nonblock, const char *what)
+{
+	char c = 0;
+	int flags;
+
+	flags = fcntl(fd, F_GETFL);
+	TEST_ASSERT_NOT_EQUAL_INT_MESSAGE(-1, flags, what);
+	TEST_ASSERT_EQUAL_INT_MESSAGE(nonblock ? O_NONBLOCK : 0, flags & O_NONBLOCK, what);
+
+	if (nonblock != 0) {
+		errno = 0;
+		TEST_ASSERT_EQUAL_INT_MESSAGE(-1, recv(fd, &c, 1, 0), what);
+		TEST_ASSERT_TRUE_MESSAGE((errno == EAGAIN) || (errno == EWOULDBLOCK), what);
+	}
+
+	TEST_ASSERT_EQUAL_INT_MESSAGE(1, send(peer, "x", 1, 0), what);
+	TEST_ASSERT_EQUAL_INT_MESSAGE(1, recv(fd, &c, 1, 0), what);
+	TEST_ASSERT_EQUAL_INT_MESSAGE('x', c, what);
+}
+
+
+/*
+ * Sets non-blocking mode of `fd` with ioctl(FIONBIO), returns 0 or the errno.
+ * The argument is an int, as CPython passes it, although Phoenix-RTOS encodes
+ * the request with an unsigned long: the bytes past the int are set so that
+ * reading them would leave non-blocking a socket that was asked to block.
+ */
+static int unix_fionbio(int fd, int on)
+{
+	struct {
+		int val;
+		int pad;
+	} arg = { on, -1 };
+
+	return (ioctl(fd, FIONBIO, &arg.val) == 0) ? 0 : errno;
+}
+
+
+/*
+ * Non-blocking mode of a socketpair() end, set by ioctl(FIONBIO) and by
+ * fcntl(F_SETFL). CPython's socket.setblocking() uses FIONBIO, and asyncio
+ * calls it on a socketpair() before its event loop can run.
+ */
+TEST(test_unix_socket, socketpair_nonblock)
+{
+	unsigned int types[] = { SOCK_STREAM, SOCK_DGRAM, SOCK_SEQPACKET };
+	struct winsize ws;
+	size_t i;
+	int sv[2];
+
+	for (i = 0; i < sizeof(types) / sizeof(types[0]); i++) {
+		TEST_ASSERT_EQUAL_INT(0, socketpair(AF_UNIX, types[i], 0, sv));
+		unix_nonblock_expect(sv[0], sv[1], 0, "new socket");
+
+		/* ioctl(FIONBIO) on one end, both directions */
+		TEST_ASSERT_EQUAL_INT_MESSAGE(0, unix_fionbio(sv[0], 1), "FIONBIO 1 errno");
+		unix_nonblock_expect(sv[0], sv[1], 1, "FIONBIO 1");
+		/* the other end is a socket of its own */
+		unix_nonblock_expect(sv[1], sv[0], 0, "peer of FIONBIO 1");
+
+		TEST_ASSERT_EQUAL_INT_MESSAGE(0, unix_fionbio(sv[0], 0), "FIONBIO 0 errno");
+		unix_nonblock_expect(sv[0], sv[1], 0, "FIONBIO 0");
+
+		/* fcntl(F_SETFL) on the other end, and FIONBIO clears what F_SETFL set */
+		TEST_ASSERT_EQUAL_INT(0, fcntl(sv[1], F_SETFL, fcntl(sv[1], F_GETFL) | O_NONBLOCK));
+		unix_nonblock_expect(sv[1], sv[0], 1, "F_SETFL O_NONBLOCK");
+		TEST_ASSERT_EQUAL_INT_MESSAGE(0, unix_fionbio(sv[1], 0), "FIONBIO 0 after F_SETFL errno");
+		unix_nonblock_expect(sv[1], sv[0], 0, "FIONBIO 0 after F_SETFL");
+
+		/* a request a socket does not handle */
+		errno = 0;
+		TEST_ASSERT_EQUAL_INT(-1, ioctl(sv[0], TIOCGWINSZ, &ws));
+		TEST_ASSERT_EQUAL_INT(ENOTTY, errno);
+
+		close(sv[0]);
+		close(sv[1]);
+	}
+}
+
+
 /*
  * connect()/accept() across two processes: the accepted socket reports the
  * connecting process, the connecting socket reports the listening one (as on
@@ -3179,6 +3262,7 @@ TEST_GROUP_RUNNER(test_unix_socket)
 	RUN_TEST_CASE(test_unix_socket, dgram_msg_peek);
 	RUN_TEST_CASE(test_unix_socket, dgram_sender_isolation);
 	RUN_TEST_CASE(test_unix_socket, peercred_socketpair);
+	RUN_TEST_CASE(test_unix_socket, socketpair_nonblock);
 	RUN_TEST_CASE(test_unix_socket, peercred_connect);
 	RUN_TEST_CASE(test_unix_socket, peercred_unconnected);
 }
