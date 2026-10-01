@@ -20,6 +20,7 @@
 void runner(void)
 {
 	RUN_TEST_GROUP(test_semaphore);
+	RUN_TEST_GROUP(posix_semaphore);
 }
 
 
