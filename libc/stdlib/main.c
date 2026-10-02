@@ -21,6 +21,7 @@
 void runner(void)
 {
 	RUN_TEST_GROUP(stdlib_alloc);
+	RUN_TEST_GROUP(stdlib_malloc_retain);
 	RUN_TEST_GROUP(stdlib_env);
 	RUN_TEST_GROUP(stdlib_bsearch);
 	RUN_TEST_GROUP(stdlib_strto);
