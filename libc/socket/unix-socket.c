@@ -3277,6 +3277,142 @@ TEST(test_unix_socket, sockopt_acceptconn)
 }
 
 
+/* Two files told apart by their size: file i holds 1 + i bytes. */
+static void unix_sized_files(int *fd, size_t cnt)
+{
+	TEST_ASSERT_EQUAL_INT(0, open_files(fd, cnt));
+	TEST_ASSERT_EQUAL_INT(0, write_files(fd, cnt, data));
+}
+
+
+static long unix_file_size(int fd)
+{
+	struct stat st;
+
+	return (fstat(fd, &st) == 0) ? (long)st.st_size : -1L;
+}
+
+
+/*
+ * The descriptors of a message arrive with that message, not with whichever
+ * message is read first. WebKit's IPC (SOCK_SEQPACKET) sends one shared-memory
+ * descriptor per message and drops the connection when a message comes without
+ * its descriptor - which a kernel that hands every queued descriptor to the first
+ * read did as soon as two such messages were waiting.
+ */
+static void unix_fd_per_message(int type)
+{
+	int sv[2], sfd[2], rfd[MAX_FD_CNT];
+	size_t rcnt;
+	ssize_t n;
+
+	TEST_ASSERT_EQUAL_INT(0, socketpair(AF_UNIX, type, 0, sv));
+	unix_sized_files(sfd, 2);
+
+	TEST_ASSERT_EQUAL_INT(1, msg_send(sv[0], "A", 1, &sfd[0], 1));
+	TEST_ASSERT_EQUAL_INT(1, msg_send(sv[0], "B", 1, &sfd[1], 1));
+	TEST_ASSERT_EQUAL_INT(0, close_files(sfd, 2));
+
+	n = msg_recv(sv[1], buf, sizeof(buf), rfd, &rcnt);
+	TEST_ASSERT_EQUAL_INT(1, n);
+	TEST_ASSERT_EQUAL_CHAR('A', buf[0]);
+	TEST_ASSERT_EQUAL_INT_MESSAGE(1, rcnt, "descriptors with the first message");
+	TEST_ASSERT_EQUAL_INT_MESSAGE(1, unix_file_size(rfd[0]), "first message got the second's descriptor");
+	TEST_ASSERT_EQUAL_INT(0, close_files(rfd, rcnt));
+
+	n = msg_recv(sv[1], buf, sizeof(buf), rfd, &rcnt);
+	TEST_ASSERT_EQUAL_INT(1, n);
+	TEST_ASSERT_EQUAL_CHAR('B', buf[0]);
+	TEST_ASSERT_EQUAL_INT_MESSAGE(1, rcnt, "descriptors with the second message");
+	TEST_ASSERT_EQUAL_INT(2, unix_file_size(rfd[0]));
+	TEST_ASSERT_EQUAL_INT(0, close_files(rfd, rcnt));
+
+	close(sv[0]);
+	close(sv[1]);
+	TEST_ASSERT_EQUAL_INT(0, unlink_files(2));
+}
+
+
+TEST(test_unix_socket, fd_per_message)
+{
+	unix_fd_per_message(SOCK_SEQPACKET);
+	unix_fd_per_message(SOCK_DGRAM);
+}
+
+
+/*
+ * A message read with no control buffer loses its descriptors (Linux closes
+ * them and sets MSG_CTRUNC); they must not turn up with the next message.
+ */
+static void unix_fd_not_carried_over(int type)
+{
+	int sv[2], sfd[1], rfd[MAX_FD_CNT];
+	size_t rcnt;
+	ssize_t n;
+
+	TEST_ASSERT_EQUAL_INT(0, socketpair(AF_UNIX, type, 0, sv));
+	unix_sized_files(sfd, 1);
+
+	TEST_ASSERT_EQUAL_INT(1, msg_send(sv[0], "A", 1, sfd, 1));
+	TEST_ASSERT_EQUAL_INT(1, msg_send(sv[0], "B", 1, NULL, 0));
+	TEST_ASSERT_EQUAL_INT(0, close_files(sfd, 1));
+
+	/* no control buffer: the descriptor of "A" cannot be delivered */
+	TEST_ASSERT_EQUAL_INT(1, recv(sv[1], buf, sizeof(buf), 0));
+	TEST_ASSERT_EQUAL_CHAR('A', buf[0]);
+
+	n = msg_recv(sv[1], buf, sizeof(buf), rfd, &rcnt);
+	TEST_ASSERT_EQUAL_INT(1, n);
+	TEST_ASSERT_EQUAL_CHAR('B', buf[0]);
+	TEST_ASSERT_EQUAL_INT_MESSAGE(0, rcnt, "a message without descriptors got some");
+	(void)close_files(rfd, rcnt);
+
+	close(sv[0]);
+	close(sv[1]);
+	TEST_ASSERT_EQUAL_INT(0, unlink_files(1));
+}
+
+
+TEST(test_unix_socket, fd_not_carried_over)
+{
+	unix_fd_not_carried_over(SOCK_SEQPACKET);
+	unix_fd_not_carried_over(SOCK_DGRAM);
+}
+
+
+/*
+ * A 4096-byte message on a new framed socketpair. WebKit's IPC sends inline
+ * messages of up to 4096 bytes over SOCK_SEQPACKET and drops one whose send
+ * fails, so a default ring that cannot hold a 4096-byte frame (one page less
+ * the frame header) silently loses messages.
+ */
+static void unix_message_4096(int type)
+{
+	static char big[4096], got[4096 + 1];
+	int sv[2];
+	size_t i;
+
+	for (i = 0; i < sizeof(big); i++) {
+		big[i] = (char)(i * 7u + 1u);
+	}
+
+	TEST_ASSERT_EQUAL_INT(0, socketpair(AF_UNIX, type, 0, sv));
+	errno = 0;
+	TEST_ASSERT_EQUAL_INT_MESSAGE(sizeof(big), send(sv[0], big, sizeof(big), 0), "send errno (EMSGSIZE=too small a default ring)");
+	TEST_ASSERT_EQUAL_INT(sizeof(big), recv(sv[1], got, sizeof(got), 0));
+	TEST_ASSERT_EQUAL_MEMORY(big, got, sizeof(big));
+	close(sv[0]);
+	close(sv[1]);
+}
+
+
+TEST(test_unix_socket, message_4096)
+{
+	unix_message_4096(SOCK_SEQPACKET);
+	unix_message_4096(SOCK_DGRAM);
+}
+
+
 TEST_GROUP_RUNNER(test_unix_socket)
 {
 	RUN_TEST_CASE(test_unix_socket, zero_len_send);
@@ -3323,6 +3459,9 @@ TEST_GROUP_RUNNER(test_unix_socket)
 	RUN_TEST_CASE(test_unix_socket, peercred_unconnected);
 	RUN_TEST_CASE(test_unix_socket, sockopt_type);
 	RUN_TEST_CASE(test_unix_socket, sockopt_acceptconn);
+	RUN_TEST_CASE(test_unix_socket, fd_per_message);
+	RUN_TEST_CASE(test_unix_socket, fd_not_carried_over);
+	RUN_TEST_CASE(test_unix_socket, message_4096);
 }
 
 /*
