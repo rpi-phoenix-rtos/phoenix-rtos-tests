@@ -18,6 +18,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/wait.h>
 
 #include "unity_fixture.h"
@@ -204,6 +205,80 @@ TEST(test_mprotect, args)
 }
 
 
+/* meminfo() credits each map entry with the anonymous pages of its own range. mprotect() splits
+ * an entry, and the pieces share one amap at different offsets: the kernel used to count the
+ * whole amap for each of them, so a mapping split in three reported its pages three times
+ * (WebKit's memory-pressure handler reads this sum and saw GBs). */
+static entryinfo_t *self_entries(int *count)
+{
+	meminfo_t info;
+	entryinfo_t *map = NULL, *grown;
+	int mapsz = 64;
+
+	for (;;) {
+		grown = realloc(map, (size_t)mapsz * sizeof(*map));
+		if (grown == NULL) {
+			free(map);
+			return NULL;
+		}
+		map = grown;
+		memset(&info, 0, sizeof(info));
+		info.page.mapsz = -1;
+		info.maps.mapsz = -1;
+		info.entry.kmapsz = -1;
+		info.entry.pid = (unsigned int)getpid();
+		info.entry.mapsz = mapsz;
+		info.entry.map = map;
+		meminfo(&info);
+		if (info.entry.mapsz < 0) {
+			free(map);
+			return NULL;
+		}
+		if (info.entry.mapsz <= mapsz) {
+			*count = info.entry.mapsz;
+			return map;
+		}
+		mapsz = info.entry.mapsz + 16;
+	}
+}
+
+
+TEST(test_mprotect, meminfo_anonsz_of_split_entries)
+{
+	const int pages = 16, touched = 12;
+	unsigned char *area = mmap(NULL, page_size * pages, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+	unsigned char *mid = area + (4 * page_size);
+	entryinfo_t *map;
+	int count, i, found = 0;
+
+	TEST_ASSERT(area != MAP_FAILED);
+	for (i = 0; i < touched; i++) {
+		area[i * page_size] = 0x42;
+	}
+	/* pages 4..7 read-only: three entries, [0,4) [4,8) [8,16), all of them on the one amap */
+	TEST_ASSERT_EQUAL_INT(0, mprotect(mid, page_size * 4, PROT_READ));
+
+	map = self_entries(&count);
+	TEST_ASSERT_NOT_NULL(map);
+	for (i = 0; i < count; i++) {
+		/* no entry holds more anonymous memory than its size, in any mapping of this process */
+		if (map[i].anonsz != (size_t)-1) {
+			TEST_ASSERT_LESS_OR_EQUAL_UINT64(map[i].size, map[i].anonsz);
+		}
+		if (map[i].vaddr == mid) {
+			/* the read-only piece cannot merge with a neighbour: exactly its own four pages */
+			TEST_ASSERT_EQUAL_UINT64(page_size * 4, map[i].size);
+			TEST_ASSERT_EQUAL_UINT64(page_size * 4, map[i].anonsz);
+			found = 1;
+		}
+	}
+	free(map);
+	TEST_ASSERT_TRUE(found);
+
+	TEST_ASSERT_EQUAL_INT(0, munmap(area, page_size * pages));
+}
+
+
 TEST_GROUP_RUNNER(test_mprotect)
 {
 	RUN_TEST_CASE(test_mprotect, test_mprotect_singlecore);
@@ -212,6 +287,7 @@ TEST_GROUP_RUNNER(test_mprotect)
 	RUN_TEST_CASE(test_mprotect, unaligned_len_covers_last_page);
 	RUN_TEST_CASE(test_mprotect, unaligned_len_stops_at_last_page);
 	RUN_TEST_CASE(test_mprotect, args);
+	RUN_TEST_CASE(test_mprotect, meminfo_anonsz_of_split_entries);
 }
 
 
