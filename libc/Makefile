@@ -61,6 +61,8 @@ $(eval $(call add_test_libc,pthread-fork, -lpthread))
 $(eval $(call add_test_libc,mutex, -lpthread))
 # the test binary spawns itself as the child
 $(eval $(call add_test_libc,spawn, -lpthread))
+# JIT-style code: RWX mmap, write, __builtin___clear_cache, run, rewrite, run again
+$(eval $(call add_test_libc,jit, -lpthread))
 
 # Not a unity test: prints the cost of a malloc(64)+free() pair while the process
 # is single-threaded (heap lock skipped) and after it has started a thread
