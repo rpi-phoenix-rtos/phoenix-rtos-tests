@@ -216,3 +216,10 @@ test:
           armv7r5f-zynqmp-qemu,
           armv8m55-stm32n6-nucleo,
           ]
+
+    - name: jit
+      execute: test-libc-jit
+      targets:
+        # the code it writes and runs is aarch64 (elsewhere the test is ignored); on an
+        # emulator the flush checks cannot fail, so the last case is ignored there
+        include: [aarch64a53-zynqmp-qemu]

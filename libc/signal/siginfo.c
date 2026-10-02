@@ -411,6 +411,106 @@ TEST(siginfo, pthread_kill_target_context)
 }
 
 
+/* The same handshake on a thread that never enters the kernel, as JIT code in a loop does: a
+ * garbage collector or a sampling profiler suspends such a thread too. The signal reaches it
+ * when it is next preempted. While it waits in the handler it must not run on (its counter
+ * stands still), and after the resume it must. Repeated, as a collector does on every cycle. */
+
+#define SIGINFO_SPIN_ROUNDS 20
+
+static volatile unsigned long siginfo_spins;
+static volatile int siginfo_stopSpinning;
+
+
+static void *siginfo_spinner(void *arg)
+{
+	(void)arg;
+
+	while (siginfo_stopSpinning == 0) {
+		siginfo_spins++;
+	}
+
+	return NULL;
+}
+
+
+static int siginfo_waitFor(volatile int *flag)
+{
+	int i;
+
+	for (i = 0; (i < 5000) && (*flag == 0); i++) {
+		usleep(1000);
+	}
+
+	return *flag;
+}
+
+
+TEST(siginfo, pthread_kill_running_thread)
+{
+	pthread_attr_t attr;
+	pthread_t tid;
+	unsigned long before, after;
+	int round, suspended = 1, stood = 1, ran = 1, sp = 1, resumed = 1;
+
+	siginfo_stopSpinning = 0;
+	siginfo_spins = 0;
+	siginfo_depth = 0;
+	siginfo_install(SIGUSR1, siginfo_suspendHandler, 0);
+
+	TEST_ASSERT_EQUAL_INT(0, pthread_attr_init(&attr));
+	TEST_ASSERT_EQUAL_INT(0, pthread_attr_setstack(&attr, siginfo_stack, sizeof(siginfo_stack)));
+	TEST_ASSERT_EQUAL_INT(0, pthread_create(&tid, &attr, siginfo_spinner, NULL));
+	TEST_ASSERT_EQUAL_INT(0, pthread_attr_destroy(&attr));
+	siginfo_target = tid;
+
+	for (round = 0; (round < SIGINFO_SPIN_ROUNDS) && (suspended != 0) && (resumed != 0); round++) {
+		siginfo_suspended = 0;
+		siginfo_resumed = 0;
+		siginfo_rec.valid = 0;
+
+		TEST_ASSERT_EQUAL_INT(0, pthread_kill(tid, SIGUSR1));
+		suspended = siginfo_waitFor(&siginfo_suspended);
+		if (suspended == 0) {
+			break;
+		}
+
+		/* Parked in sigsuspend(): the loop does not advance */
+		before = siginfo_spins;
+		usleep(20000);
+		stood = stood && (siginfo_spins == before);
+		sp = sp && (siginfo_rec.valid != 0) && (siginfo_rec.sp > (uintptr_t)siginfo_stack) &&
+				(siginfo_rec.sp <= (uintptr_t)siginfo_stack + sizeof(siginfo_stack));
+
+		TEST_ASSERT_EQUAL_INT(0, pthread_kill(tid, SIGUSR1));
+		resumed = siginfo_waitFor(&siginfo_resumed);
+
+		/* ...and runs on after the resume */
+		after = siginfo_spins;
+		usleep(20000);
+		ran = ran && (siginfo_spins != after);
+	}
+
+	siginfo_stopSpinning = 1;
+	if ((suspended == 0) || (resumed == 0)) {
+		/* the loop never stopped, or is still parked: the resume a failed round owes it */
+		(void)pthread_kill(tid, SIGUSR1);
+	}
+	TEST_ASSERT_EQUAL_INT(0, pthread_join(tid, NULL));
+
+	TEST_ASSERT_EQUAL_INT_MESSAGE(1, suspended, "a thread spinning in user space never ran the handler");
+	TEST_ASSERT_EQUAL_INT_MESSAGE(1, resumed, "the suspended thread was not resumed");
+	TEST_ASSERT_TRUE_MESSAGE(stood, "the thread ran on while it was suspended");
+	TEST_ASSERT_TRUE_MESSAGE(ran, "the thread did not run after the resume");
+#if defined(__aarch64__)
+	TEST_ASSERT_TRUE_MESSAGE(sp, "the ucontext sp is not on the interrupted thread's stack");
+#else
+	(void)sp;
+#endif
+	TEST_ASSERT_EQUAL_INT(0, siginfo_depth);
+}
+
+
 /* SIGCHLD tells which child ended, and how */
 TEST(siginfo, sigchld_fills_siginfo)
 {
@@ -454,5 +554,6 @@ TEST_GROUP_RUNNER(siginfo)
 	RUN_TEST_CASE(siginfo, segv_readonly_resume);
 	RUN_TEST_CASE(siginfo, uc_sigmask_restored);
 	RUN_TEST_CASE(siginfo, pthread_kill_target_context);
+	RUN_TEST_CASE(siginfo, pthread_kill_running_thread);
 	RUN_TEST_CASE(siginfo, sigchld_fills_siginfo);
 }
