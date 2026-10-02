@@ -1041,6 +1041,31 @@ TEST_GROUP_RUNNER(mutex_fast)
 }
 
 
+/* The kernel's own NORMAL mutexes (what libphoenix uses internally): relocking
+ * one you hold slept forever, or, with a timeout, returned EOK after the
+ * timeout without the caller gaining anything (KNOWN-ISSUES C11). Both must
+ * fail with EDEADLK. The timed call runs first: on the old kernel it returns
+ * after 200 ms instead of hanging the suite. */
+TEST(mutex_semantics, kernel_mutex_self_relock_edeadlk)
+{
+#ifdef __phoenix__
+	handle_t h;
+
+	TEST_ASSERT_EQUAL_INT(0, mutexCreate(&h));
+	TEST_ASSERT_EQUAL_INT(0, mutexLock(h));
+	TEST_ASSERT_EQUAL_INT(-EDEADLK, mutexLockClockWait(h, 200000, PH_CLOCK_RELATIVE));
+	TEST_ASSERT_EQUAL_INT(-EDEADLK, mutexLock(h));
+	/* still held exactly once: one unlock frees it for another locker */
+	TEST_ASSERT_EQUAL_INT(0, mutexUnlock(h));
+	TEST_ASSERT_EQUAL_INT(0, mutexTry(h));
+	TEST_ASSERT_EQUAL_INT(0, mutexUnlock(h));
+	TEST_ASSERT_EQUAL_INT(0, resourceDestroy(h));
+#else
+	TEST_IGNORE_MESSAGE("Phoenix kernel mutexes only");
+#endif
+}
+
+
 TEST_GROUP_RUNNER(mutex_semantics)
 {
 	RUN_TEST_CASE(mutex_semantics, default_protocol_is_prio_none);
@@ -1049,6 +1074,7 @@ TEST_GROUP_RUNNER(mutex_semantics)
 	RUN_TEST_CASE(mutex_semantics, timedlock_recursive_held_elsewhere);
 	RUN_TEST_CASE(mutex_semantics, recursive_depth);
 	RUN_TEST_CASE(mutex_semantics, errorcheck);
+	RUN_TEST_CASE(mutex_semantics, kernel_mutex_self_relock_edeadlk);
 }
 
 
