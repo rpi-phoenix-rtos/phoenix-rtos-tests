@@ -1,0 +1,5 @@
+/* The symbols test-libc-dlopen exports to its plugins (ld --dynamic-list). */
+{
+	dltest_host_add;
+	dltest_host_value;
+};
