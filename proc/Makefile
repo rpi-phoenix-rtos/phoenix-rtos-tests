@@ -12,3 +12,9 @@ $(eval $(call add_test, test_msg))
 $(eval $(call add_test, test_pthreads))
 $(eval $(call add_test, test_priority))
 $(eval $(call add_unity_test, test_thread_rand))
+
+NAME := test-msg-abandon
+LOCAL_SRCS := test_msg_abandon.c
+DEP_LIBS := unity
+
+include $(binary.mk)
