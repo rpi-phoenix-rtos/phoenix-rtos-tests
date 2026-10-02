@@ -3221,6 +3221,62 @@ TEST(test_unix_socket, peercred_unconnected)
 }
 
 
+/* SO_TYPE on every socket type: GLib's g_socket_new_from_fd() refuses a socket that cannot
+ * answer it, which is how WebKit adopts the IPC socket a child process inherits. */
+TEST(test_unix_socket, sockopt_type)
+{
+	int types[] = { SOCK_STREAM, SOCK_DGRAM, SOCK_SEQPACKET };
+	socklen_t len;
+	size_t i;
+	int sv[2], value;
+
+	for (i = 0; i < sizeof(types) / sizeof(types[0]); i++) {
+		TEST_ASSERT_EQUAL_INT(0, socketpair(AF_UNIX, types[i], 0, sv));
+		value = -1;
+		len = sizeof(value);
+		TEST_ASSERT_EQUAL_INT(0, getsockopt(sv[0], SOL_SOCKET, SO_TYPE, &value, &len));
+		TEST_ASSERT_EQUAL_INT(types[i], value);
+		TEST_ASSERT_EQUAL_INT(sizeof(int), len);
+		close(sv[0]);
+		close(sv[1]);
+	}
+
+	/* the type survives SOCK_NONBLOCK/SOCK_CLOEXEC: the flags are not part of it */
+	TEST_ASSERT_EQUAL_INT(0, socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0, sv));
+	value = -1;
+	len = sizeof(value);
+	TEST_ASSERT_EQUAL_INT(0, getsockopt(sv[1], SOL_SOCKET, SO_TYPE, &value, &len));
+	TEST_ASSERT_EQUAL_INT(SOCK_STREAM, value);
+	close(sv[0]);
+	close(sv[1]);
+}
+
+
+TEST(test_unix_socket, sockopt_acceptconn)
+{
+	const char *socket_name = "/tmp/test_sockopt_acceptconn";
+	socklen_t len;
+	int fd, value;
+
+	fd = unix_named_socket(SOCK_STREAM, socket_name);
+	TEST_ASSERT_GREATER_OR_EQUAL_INT(0, fd);
+
+	value = -1;
+	len = sizeof(value);
+	TEST_ASSERT_EQUAL_INT(0, getsockopt(fd, SOL_SOCKET, SO_ACCEPTCONN, &value, &len));
+	TEST_ASSERT_EQUAL_INT(0, value);
+
+	TEST_ASSERT_EQUAL_INT(0, listen(fd, 1));
+	value = -1;
+	len = sizeof(value);
+	TEST_ASSERT_EQUAL_INT(0, getsockopt(fd, SOL_SOCKET, SO_ACCEPTCONN, &value, &len));
+	TEST_ASSERT_NOT_EQUAL_INT(0, value);
+
+	close(fd);
+	unlink(socket_name);
+}
+
+
 TEST_GROUP_RUNNER(test_unix_socket)
 {
 	RUN_TEST_CASE(test_unix_socket, zero_len_send);
@@ -3265,6 +3321,8 @@ TEST_GROUP_RUNNER(test_unix_socket)
 	RUN_TEST_CASE(test_unix_socket, socketpair_nonblock);
 	RUN_TEST_CASE(test_unix_socket, peercred_connect);
 	RUN_TEST_CASE(test_unix_socket, peercred_unconnected);
+	RUN_TEST_CASE(test_unix_socket, sockopt_type);
+	RUN_TEST_CASE(test_unix_socket, sockopt_acceptconn);
 }
 
 /*
