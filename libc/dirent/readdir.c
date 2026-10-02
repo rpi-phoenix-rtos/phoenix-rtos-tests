@@ -476,6 +476,327 @@ TEST(dirent_readdir, unlink_during_iteration)
 }
 
 
+/*
+ * Removing entries while iterating (rm -rf, find -delete, GLib's recursive
+ * delete). Each entry must be returned exactly once and the directory must end
+ * up empty: a readdir position that shifts when an earlier entry is removed
+ * skips the next one, and rm -rf then fails with "Directory not empty"
+ * (seen on the NFS root and on dummyfs). Enough entries for an ext2 directory
+ * to span several blocks.
+ */
+
+#define WALK_DIR      MAIN_DIR "/walk"
+#define WALK_FILES    400
+#define WALK_SUBDIRS  8
+#define WALK_SUBFILES 5
+
+
+static void walk_path(char *buf, size_t size, int file, int subdir, int inner)
+{
+	if (subdir < 0) {
+		snprintf(buf, size, WALK_DIR "/entry-%04d-with-a-longer-name", file);
+	}
+	else if (inner < 0) {
+		snprintf(buf, size, WALK_DIR "/subdir-%02d", subdir);
+	}
+	else {
+		snprintf(buf, size, WALK_DIR "/subdir-%02d/inner-%d", subdir, inner);
+	}
+}
+
+
+static void walk_create(int files, int subdirs)
+{
+	char path[PATH_MAX];
+
+	TEST_MKDIR_ASSERTED(WALK_DIR, 0700);
+
+	/* subdirectories spread among the files, so the scan meets them mid-way */
+	for (int i = 0; i < files; i++) {
+		walk_path(path, sizeof(path), i, -1, -1);
+		int fd = creat(path, S_IRUSR | S_IWUSR);
+		TEST_ASSERT_GREATER_OR_EQUAL_INT(0, fd);
+		TEST_ASSERT_EQUAL_INT(0, close(fd));
+
+		if ((subdirs > 0) && ((i % (files / subdirs)) == 0) && ((i / (files / subdirs)) < subdirs)) {
+			int j = i / (files / subdirs);
+			walk_path(path, sizeof(path), 0, j, -1);
+			TEST_MKDIR_ASSERTED(path, 0700);
+			for (int k = 0; k < WALK_SUBFILES; k++) {
+				walk_path(path, sizeof(path), 0, j, k);
+				fd = creat(path, S_IRUSR | S_IWUSR);
+				TEST_ASSERT_GREATER_OR_EQUAL_INT(0, fd);
+				TEST_ASSERT_EQUAL_INT(0, close(fd));
+			}
+		}
+	}
+}
+
+
+/* Remove everything by name, without readdir(), so a failed test leaves nothing behind */
+static void walk_cleanup(void)
+{
+	char path[PATH_MAX];
+
+	for (int i = 0; i < WALK_FILES; i++) {
+		walk_path(path, sizeof(path), i, -1, -1);
+		unlink(path);
+	}
+	for (int j = 0; j < WALK_SUBDIRS; j++) {
+		for (int k = 0; k < WALK_SUBFILES; k++) {
+			walk_path(path, sizeof(path), 0, j, k);
+			unlink(path);
+		}
+		walk_path(path, sizeof(path), 0, j, -1);
+		rmdir(path);
+	}
+	rmdir(WALK_DIR);
+}
+
+
+static int walk_seenFile[WALK_FILES];
+static int walk_seenDir[WALK_SUBDIRS];
+static int walk_seenInner[WALK_SUBDIRS][WALK_SUBFILES];
+static int walk_unknown, walk_rmFailed;
+
+
+static int walk_isDot(const char *name)
+{
+	return (strcmp(name, ".") == 0) || (strcmp(name, "..") == 0);
+}
+
+
+/* rm -rf of one subdirectory's contents: read an entry, remove it, read on */
+static void walk_rmSub(int j)
+{
+	char path[PATH_MAX];
+	struct dirent *info;
+	int k;
+
+	walk_path(path, sizeof(path), 0, j, -1);
+	DIR *dp = opendir(path);
+	if (dp == NULL) {
+		walk_rmFailed++;
+		return;
+	}
+
+	while ((info = readdir(dp)) != NULL) {
+		if (walk_isDot(info->d_name)) {
+			continue;
+		}
+		if ((sscanf(info->d_name, "inner-%d", &k) != 1) || (k < 0) || (k >= WALK_SUBFILES)) {
+			walk_unknown++;
+			continue;
+		}
+		walk_seenInner[j][k]++;
+		walk_path(path, sizeof(path), 0, j, k);
+		if (unlink(path) != 0) {
+			walk_rmFailed++;
+		}
+	}
+	closedir(dp);
+}
+
+
+/* rm -rf WALK_DIR, the way busybox does it: each entry is removed (a
+ * subdirectory after its own contents) before the next one is read */
+static void walk_rmTop(void)
+{
+	char path[PATH_MAX];
+	struct dirent *info;
+	int i;
+
+	memset(walk_seenFile, 0, sizeof(walk_seenFile));
+	memset(walk_seenDir, 0, sizeof(walk_seenDir));
+	memset(walk_seenInner, 0, sizeof(walk_seenInner));
+	walk_unknown = 0;
+	walk_rmFailed = 0;
+
+	DIR *dp = TEST_OPENDIR_ASSERTED(WALK_DIR);
+	while ((info = readdir(dp)) != NULL) {
+		if (walk_isDot(info->d_name)) {
+			continue;
+		}
+		if ((sscanf(info->d_name, "entry-%d", &i) == 1) && (i >= 0) && (i < WALK_FILES)) {
+			walk_seenFile[i]++;
+			walk_path(path, sizeof(path), i, -1, -1);
+			if (unlink(path) != 0) {
+				walk_rmFailed++;
+			}
+		}
+		else if ((sscanf(info->d_name, "subdir-%d", &i) == 1) && (i >= 0) && (i < WALK_SUBDIRS)) {
+			walk_seenDir[i]++;
+			walk_rmSub(i);
+			walk_path(path, sizeof(path), 0, i, -1);
+			if (rmdir(path) != 0) {
+				walk_rmFailed++;
+			}
+		}
+		else {
+			walk_unknown++;
+		}
+	}
+	closedir(dp);
+}
+
+
+static int walk_countOff(const int *seen, int n, int *repeated)
+{
+	int missed = 0;
+
+	for (int i = 0; i < n; i++) {
+		if (seen[i] == 0) {
+			missed++;
+		}
+		else if (seen[i] > 1) {
+			(*repeated)++;
+		}
+	}
+
+	return missed;
+}
+
+
+TEST(dirent_readdir, rm_rf_while_iterating)
+{
+	if (TEST_PROTECT()) {
+		walk_create(WALK_FILES, WALK_SUBDIRS);
+		walk_rmTop();
+
+		int repeated = 0;
+		int missed = walk_countOff(walk_seenFile, WALK_FILES, &repeated);
+		missed += walk_countOff(walk_seenDir, WALK_SUBDIRS, &repeated);
+		missed += walk_countOff(&walk_seenInner[0][0], WALK_SUBDIRS * WALK_SUBFILES, &repeated);
+
+		TEST_ASSERT_EQUAL_INT_MESSAGE(0, missed, "entries never returned by readdir()");
+		TEST_ASSERT_EQUAL_INT_MESSAGE(0, repeated, "entries returned more than once");
+		TEST_ASSERT_EQUAL_INT_MESSAGE(0, walk_unknown, "names that were never created");
+		TEST_ASSERT_EQUAL_INT_MESSAGE(0, walk_rmFailed, "unlink()/rmdir() failures");
+		TEST_ASSERT_EQUAL_INT_MESSAGE(0, rmdir(WALK_DIR), "rmdir of the emptied directory");
+	}
+
+	walk_cleanup();
+}
+
+
+TEST(dirent_readdir, unlink_each_entry_as_read)
+{
+	char path[PATH_MAX];
+	struct dirent *info;
+	int i;
+
+	if (TEST_PROTECT()) {
+		walk_create(WALK_FILES, 0);
+		memset(walk_seenFile, 0, sizeof(walk_seenFile));
+		walk_unknown = 0;
+		walk_rmFailed = 0;
+
+		DIR *dp = TEST_OPENDIR_ASSERTED(WALK_DIR);
+		while ((info = readdir(dp)) != NULL) {
+			if (walk_isDot(info->d_name)) {
+				continue;
+			}
+			if ((sscanf(info->d_name, "entry-%d", &i) != 1) || (i < 0) || (i >= WALK_FILES)) {
+				walk_unknown++;
+				continue;
+			}
+			walk_seenFile[i]++;
+			walk_path(path, sizeof(path), i, -1, -1);
+			if (unlink(path) != 0) {
+				walk_rmFailed++;
+			}
+		}
+		closedir(dp);
+
+		int repeated = 0;
+		int missed = walk_countOff(walk_seenFile, WALK_FILES, &repeated);
+		TEST_ASSERT_EQUAL_INT_MESSAGE(0, missed, "entries never returned by readdir()");
+		TEST_ASSERT_EQUAL_INT_MESSAGE(0, repeated, "entries returned more than once");
+		TEST_ASSERT_EQUAL_INT_MESSAGE(0, walk_unknown, "names that were never created");
+		TEST_ASSERT_EQUAL_INT_MESSAGE(0, walk_rmFailed, "unlink() failures");
+		TEST_ASSERT_EQUAL_INT_MESSAGE(0, rmdir(WALK_DIR), "rmdir of the emptied directory");
+	}
+
+	walk_cleanup();
+}
+
+
+/* Another process removes an entry this scan has not reached yet. What must
+ * hold everywhere: nothing else is lost or repeated. POSIX leaves open whether
+ * an entry removed after opendir() is still returned, and a libc that buffers
+ * several entries per call (glibc) may already hold it. libphoenix asks the
+ * filesystem for every entry, so on Phoenix a returned victim is a name the
+ * filesystem had already removed (ext2 used to read its leftover bytes). */
+TEST(dirent_readdir, unlink_unread_entry)
+{
+	const int files = 64;
+	static int order[64];
+	char path[PATH_MAX];
+	struct dirent *info;
+	DIR *dp = NULL;
+	int i, n = 0;
+
+	if (TEST_PROTECT()) {
+		walk_create(files, 0);
+		dp = TEST_OPENDIR_ASSERTED(WALK_DIR);
+
+		while ((info = readdir(dp)) != NULL) {
+			if ((sscanf(info->d_name, "entry-%d", &i) == 1) && (n < files)) {
+				order[n++] = i;
+			}
+		}
+		TEST_ASSERT_EQUAL_INT(files, n);
+
+		/* Read up to the victim, so the stream is positioned exactly at it */
+		rewinddir(dp);
+		memset(walk_seenFile, 0, sizeof(walk_seenFile));
+		for (int got = 0; got < files / 2;) {
+			info = readdir(dp);
+			TEST_ASSERT_NOT_NULL(info);
+			if (sscanf(info->d_name, "entry-%d", &i) == 1) {
+				walk_seenFile[i]++;
+				got++;
+			}
+		}
+
+		int victim = order[files / 2];
+		walk_path(path, sizeof(path), victim, -1, -1);
+		TEST_ASSERT_EQUAL_INT(0, unlink(path));
+
+		while ((info = readdir(dp)) != NULL) {
+			if (sscanf(info->d_name, "entry-%d", &i) == 1) {
+				walk_seenFile[i]++;
+			}
+		}
+
+		int missed = 0, repeated = 0;
+		for (i = 0; i < files; i++) {
+			if (i == victim) {
+				continue;
+			}
+			if (walk_seenFile[i] == 0) {
+				missed++;
+			}
+			else if (walk_seenFile[i] > 1) {
+				repeated++;
+			}
+		}
+#ifdef __phoenix__
+		TEST_ASSERT_EQUAL_INT_MESSAGE(0, walk_seenFile[victim], "the unlinked entry was returned");
+#else
+		TEST_ASSERT_LESS_OR_EQUAL_INT_MESSAGE(1, walk_seenFile[victim], "the unlinked entry was returned twice");
+#endif
+		TEST_ASSERT_EQUAL_INT_MESSAGE(0, missed, "other entries never returned");
+		TEST_ASSERT_EQUAL_INT_MESSAGE(0, repeated, "other entries returned more than once");
+	}
+
+	if (dp != NULL) {
+		closedir(dp);
+	}
+	walk_cleanup();
+}
+
+
 TEST_GROUP_RUNNER(dirent_readdir)
 {
 	RUN_TEST_CASE(dirent_readdir, basic_listing_count);
@@ -488,4 +809,7 @@ TEST_GROUP_RUNNER(dirent_readdir)
 	RUN_TEST_CASE(dirent_readdir, read_past_end_of_stream);
 	RUN_TEST_CASE(dirent_readdir, large_directory_pagination);
 	RUN_TEST_CASE(dirent_readdir, unlink_during_iteration);
+	RUN_TEST_CASE(dirent_readdir, rm_rf_while_iterating);
+	RUN_TEST_CASE(dirent_readdir, unlink_each_entry_as_read);
+	RUN_TEST_CASE(dirent_readdir, unlink_unread_entry);
 }
