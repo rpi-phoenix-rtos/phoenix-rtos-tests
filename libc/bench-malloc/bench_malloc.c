@@ -2,7 +2,7 @@
  * Phoenix-RTOS
  *
  * bench-malloc: cost of a malloc(64) + free() pair, before and after the
- * process becomes multithreaded
+ * process becomes multithreaded, and of a frame-sized malloc + memset + free
  *
  * libphoenix skips the heap lock while a process has only one thread
  * (stdlib/malloc_dl.c); on Phoenix the lock is a syscall pair. The first number
@@ -11,7 +11,14 @@
  * difference is the price of the lock; if the two are equal the elision is not
  * in this build.
  *
- *   bench-malloc [pairs]    (default 200000)
+ * The frame line allocates, fills and frees a 3 MiB block (a 1080p frame)
+ * in a loop, as a video player or decoder does per frame. An allocator that
+ * returns the block's heap to the system on free() pays a fresh mapping and a
+ * page fault per page on every iteration; one that keeps the heap pays only for
+ * the memset. "mapped after free" is how much the allocator still has mapped
+ * once the last block is freed (libphoenix only).
+ *
+ *   bench-malloc [pairs] [frames]    (defaults 200000, 100)
  *
  * Copyright 2026 Phoenix Systems
  *
@@ -24,7 +31,12 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <time.h>
+
+#ifdef __phoenix__
+#include <malloc.h>
+#endif
 
 #ifdef __phoenix__
 /* libphoenix internal (sys/threads-internal.h): nonzero once a second thread was started */
@@ -72,6 +84,40 @@ static uint64_t bench_pairs(unsigned long n)
 }
 
 
+#define BENCH_FRAME (3u * 1024u * 1024u)
+
+
+/* Returns nanoseconds per frame-sized malloc + memset + free */
+static uint64_t bench_frames(unsigned long n)
+{
+	unsigned long i;
+	uint64_t t0, t1;
+	unsigned char *p;
+
+	/* the first one creates the heap */
+	p = malloc(BENCH_FRAME);
+	if (p != NULL) {
+		memset(p, 0, BENCH_FRAME);
+		free(p);
+	}
+
+	t0 = bench_nowNs();
+	for (i = 0; i < n; i++) {
+		p = malloc(BENCH_FRAME);
+		if (p == NULL) {
+			return 0;
+		}
+		memset(p, (int)i, BENCH_FRAME);
+		/* the memset is a dead store to the compiler, which knows free() */
+		__asm__ volatile("" : : "r"(p) : "memory");
+		free(p);
+	}
+	t1 = bench_nowNs();
+
+	return (t1 - t0) / n;
+}
+
+
 static void *bench_thread(void *arg)
 {
 	return arg;
@@ -80,15 +126,22 @@ static void *bench_thread(void *arg)
 
 int main(int argc, char *argv[])
 {
-	unsigned long n = 200000u;
-	uint64_t single, multi;
+	unsigned long n = 200000u, frames = 100u;
+	uint64_t single, multi, frame;
 	pthread_t th;
 	int flag0, flag1;
 
 	if (argc > 1) {
 		n = strtoul(argv[1], NULL, 0);
 		if (n == 0u) {
-			fprintf(stderr, "usage: %s [pairs]\n", argv[0]);
+			fprintf(stderr, "usage: %s [pairs] [frames]\n", argv[0]);
+			return EXIT_FAILURE;
+		}
+	}
+	if (argc > 2) {
+		frames = strtoul(argv[2], NULL, 0);
+		if (frames == 0u) {
+			fprintf(stderr, "usage: %s [pairs] [frames]\n", argv[0]);
 			return EXIT_FAILURE;
 		}
 	}
@@ -114,6 +167,18 @@ int main(int argc, char *argv[])
 		printf("bench-malloc: ratio %llu.%llux\n", (unsigned long long)(multi / single),
 			(unsigned long long)(((multi % single) * 10u) / single));
 	}
+
+	frame = bench_frames(frames);
+	printf("bench-malloc: frame %u B malloc+memset+free %7llu ns/frame (%lu frames)\n",
+		BENCH_FRAME, (unsigned long long)frame, frames);
+#ifdef __phoenix__
+	{
+		mallocInfo_t info;
+
+		mallocInfo(&info);
+		printf("bench-malloc: mapped after free %zu kB\n", info.mapsz / 1024u);
+	}
+#endif
 
 	return EXIT_SUCCESS;
 }
