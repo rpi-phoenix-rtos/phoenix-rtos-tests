@@ -129,6 +129,23 @@ TEST(math_c99extra, atanh_special_val)
 }
 
 
+/* asinhf/acoshf/atanhf were declared in <math.h> but not defined (a program using them failed to
+ * link: WebKit's ANGLE, 2026-10-03) */
+TEST(math_c99extra, hyperbolic_inverse_float)
+{
+	TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.88137359f, asinhf(1.0f));
+	TEST_ASSERT_FLOAT_WITHIN(1e-6f, -1.8184465f, asinhf(-3.0f));
+	TEST_ASSERT_FLOAT_WITHIN(1e-6f, 1.3169579f, acoshf(2.0f));
+	TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.54930614f, atanhf(0.5f));
+	TEST_ASSERT_FLOAT_WITHIN(1e-6f, -0.54930614f, atanhf(-0.5f));
+	TEST_ASSERT_TRUE(signbit(asinhf(-0.0f)));
+	TEST_ASSERT_FLOAT_IS_NAN(acoshf(0.5f));
+	TEST_ASSERT_FLOAT_IS_NAN(atanhf(1.5f));
+	TEST_ASSERT_FLOAT_IS_INF(atanhf(1.0f));
+	TEST_ASSERT_FLOAT_IS_NEG_INF(atanhf(-1.0f));
+}
+
+
 TEST(math_c99extra, floorl_ceill_llroundl)
 {
 	/* long double (128-bit) rounding; exact integer results */
@@ -168,6 +185,7 @@ TEST_GROUP_RUNNER(math_c99extra)
 	RUN_TEST_CASE(math_c99extra, acosh_special_val);
 	RUN_TEST_CASE(math_c99extra, atanh_basic);
 	RUN_TEST_CASE(math_c99extra, atanh_special_val);
+	RUN_TEST_CASE(math_c99extra, hyperbolic_inverse_float);
 	RUN_TEST_CASE(math_c99extra, floorl_ceill_llroundl);
 	RUN_TEST_CASE(math_c99extra, nextafter_nexttoward);
 }
