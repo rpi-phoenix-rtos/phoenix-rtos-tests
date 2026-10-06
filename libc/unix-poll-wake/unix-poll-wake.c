@@ -56,6 +56,10 @@
  *    - pty_slave_in:    the same for a pty (posixsrv too): a reader polls a raw
  *                       slave, one byte is written to the master
  *    - pty_master_in:   a reader polls the master, one byte is written to the slave
+ *    - pipe_nonblock_contention: non-blocking writer and reader plus a poller on
+ *                       one pipe for 2 s; FAILS on any EAGAIN the byte counters
+ *                       prove spurious (expected to FAIL on a posixsrv that
+ *                       try-locks O_NONBLOCK requests, build 39 and older)
  *
  *    FAILS when a token is lost or malformed, a wake takes more than 1 s, a wake
  *    reports the wrong events, or p99 latency is >= 5 ms (UPW_PIPE_P99_US). That
@@ -1763,6 +1767,122 @@ static void upw_ptyTransition(const char *name, int pollSlave)
 }
 
 
+/*
+ * O_NONBLOCK must mean "do not wait for the pipe's state", never "fail if
+ * someone else is using the pipe right now". A writer and a reader, both
+ * non-blocking, move single bytes through a pipe kept nearly empty, while a
+ * third thread keeps poll()ing both ends (each poll() is a status query to the
+ * pipe's server). An EAGAIN is spurious when the counters prove it wrong: a
+ * write with at most UPW_NB_INFLIGHT bytes queued (far below any pipe's
+ * capacity), or a read with bytes known to be queued. GLib's wake-up pipe is
+ * written exactly like this and drops the byte on EAGAIN: a lost wake-up.
+ */
+#define UPW_NB_SECS     2
+#define UPW_NB_INFLIGHT 256U
+
+
+typedef struct {
+	int rd, wr;
+	volatile int stop;
+	unsigned written; /* atomic: bytes the writer has had accepted */
+	unsigned readn;   /* atomic: bytes the reader has taken */
+	unsigned wrEagain, rdEagain, errs, bad, polls;
+} upw_nb_t;
+
+
+static void *upw_nbWriter(void *arg)
+{
+	upw_nb_t *nb = arg;
+	unsigned w, inflight;
+	unsigned char b;
+	ssize_t r;
+
+	while (__atomic_load_n(&nb->stop, __ATOMIC_ACQUIRE) == 0) {
+		w = __atomic_load_n(&nb->written, __ATOMIC_RELAXED);
+		/* the reader only ever lowers it: an upper bound on what is queued */
+		inflight = w - __atomic_load_n(&nb->readn, __ATOMIC_ACQUIRE);
+		if (inflight >= UPW_NB_INFLIGHT) {
+			upw_sleepUs(100);
+			continue;
+		}
+		b = (unsigned char)w;
+		r = write(nb->wr, &b, 1);
+		if (r == 1) {
+			__atomic_store_n(&nb->written, w + 1U, __ATOMIC_RELEASE);
+		}
+		else if ((r < 0) && ((errno == EAGAIN) || (errno == EWOULDBLOCK))) {
+			/* at most UPW_NB_INFLIGHT bytes were queued: there was room */
+			nb->wrEagain++;
+		}
+		else if ((r >= 0) || (errno != EINTR)) {
+			nb->errs++;
+			break;
+		}
+	}
+	return NULL;
+}
+
+
+static void *upw_nbReader(void *arg)
+{
+	upw_nb_t *nb = arg;
+	unsigned n, queued;
+	unsigned char b;
+	ssize_t r;
+
+	for (;;) {
+		n = __atomic_load_n(&nb->readn, __ATOMIC_RELAXED);
+		/* written only grows: a lower bound on what is queued */
+		queued = __atomic_load_n(&nb->written, __ATOMIC_ACQUIRE) - n;
+		if (queued == 0U) {
+			if (__atomic_load_n(&nb->stop, __ATOMIC_ACQUIRE) != 0) {
+				break;
+			}
+			upw_sleepUs(100);
+			continue;
+		}
+		r = read(nb->rd, &b, 1);
+		if (r == 1) {
+			if (b != (unsigned char)n) {
+				nb->bad++;
+			}
+			__atomic_store_n(&nb->readn, n + 1U, __ATOMIC_RELEASE);
+		}
+		else if ((r < 0) && ((errno == EAGAIN) || (errno == EWOULDBLOCK))) {
+			/* at least one byte was queued */
+			nb->rdEagain++;
+		}
+		else if ((r >= 0) || (errno != EINTR)) {
+			nb->errs++;
+			break;
+		}
+	}
+	return NULL;
+}
+
+
+static void *upw_nbPoller(void *arg)
+{
+	upw_nb_t *nb = arg;
+	struct pollfd pfd[2];
+
+	while (__atomic_load_n(&nb->stop, __ATOMIC_ACQUIRE) == 0) {
+		pfd[0].fd = nb->rd;
+		pfd[0].events = POLLIN;
+		pfd[0].revents = 0;
+		pfd[1].fd = nb->wr;
+		pfd[1].events = POLLOUT;
+		pfd[1].revents = 0;
+		if (poll(pfd, 2, 0) < 0) {
+			nb->errs++;
+			break;
+		}
+		nb->polls++;
+	}
+	return NULL;
+}
+
+
 TEST_GROUP(pipe_poll_wake);
 
 
@@ -1839,6 +1959,47 @@ TEST(pipe_poll_wake, pty_master_in)
 }
 
 
+TEST(pipe_poll_wake, pipe_nonblock_contention)
+{
+	upw_nb_t nb;
+	pthread_t wt, rt, pt;
+	int p[2], ok;
+
+	memset(&nb, 0, sizeof(nb));
+	TEST_ASSERT_EQUAL_INT(0, pipe(p));
+	nb.rd = p[0];
+	nb.wr = p[1];
+	TEST_ASSERT_EQUAL_INT(0, fcntl(nb.rd, F_SETFL, fcntl(nb.rd, F_GETFL) | O_NONBLOCK));
+	TEST_ASSERT_EQUAL_INT(0, fcntl(nb.wr, F_SETFL, fcntl(nb.wr, F_GETFL) | O_NONBLOCK));
+
+	TEST_ASSERT_EQUAL_INT(0, pthread_create(&pt, NULL, upw_nbPoller, &nb));
+	TEST_ASSERT_EQUAL_INT(0, pthread_create(&rt, NULL, upw_nbReader, &nb));
+	TEST_ASSERT_EQUAL_INT(0, pthread_create(&wt, NULL, upw_nbWriter, &nb));
+	upw_sleepUs(UPW_NB_SECS * 1000000U);
+	__atomic_store_n(&nb.stop, 1, __ATOMIC_RELEASE);
+	pthread_join(wt, NULL);
+	pthread_join(pt, NULL);
+	pthread_join(rt, NULL);
+	close(p[0]);
+	close(p[1]);
+
+	printf("UPW case=pipe_nonblock_contention secs=%d written=%u read=%u polls=%u wr_spurious_eagain=%u "
+		   "rd_spurious_eagain=%u bad=%u errs=%u\n",
+		UPW_NB_SECS, nb.written, nb.readn, nb.polls, nb.wrEagain, nb.rdEagain, nb.bad, nb.errs);
+	ok = (nb.wrEagain == 0U) && (nb.rdEagain == 0U) && (nb.bad == 0U) && (nb.errs == 0U) &&
+		(nb.written == nb.readn) && (nb.written > 0U);
+	printf("UPW case=pipe_nonblock_contention verdict=%s\n", (ok != 0) ? "PASS" : "FAIL");
+	fflush(stdout);
+
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(0, nb.errs, "write()/read()/poll() failed");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(0, nb.bad, "bytes reordered or corrupted");
+	TEST_ASSERT_TRUE_MESSAGE(nb.written > 0U, "nothing was written");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(nb.written, nb.readn, "bytes written != bytes read");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(0, nb.wrEagain, "a non-blocking write got EAGAIN with room in the pipe");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(0, nb.rdEagain, "a non-blocking read got EAGAIN with data in the pipe");
+}
+
+
 TEST_GROUP_RUNNER(pipe_poll_wake)
 {
 	RUN_TEST_CASE(pipe_poll_wake, pipe_thread);
@@ -1849,6 +2010,7 @@ TEST_GROUP_RUNNER(pipe_poll_wake)
 	RUN_TEST_CASE(pipe_poll_wake, pipe_hup_writer);
 	RUN_TEST_CASE(pipe_poll_wake, pty_slave_in);
 	RUN_TEST_CASE(pipe_poll_wake, pty_master_in);
+	RUN_TEST_CASE(pipe_poll_wake, pipe_nonblock_contention);
 }
 
 
