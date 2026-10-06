@@ -16,7 +16,9 @@
  *   prof_sampling.blocked_send_attributed - a thread blocked in msgSend() on a server that holds the
  *     request is seen: msg_send names the port, msg_recv the server thread that took the request,
  *     thread_wait the client with the port as its syscall argument and the caller of msgSend() as
- *     its user lr, and thread_wakeup the server as the waker, after the time the server held it.
+ *     its user lr, and thread_wakeup the server as the waker. The trace records waits of 1 ms or
+ *     more when they end (waitMinUs, as prof does), so the wait carries its length: at least the
+ *     time the server held the request. The trace is read while it records, as prof does.
  *   These tests FAIL on a kernel without "perf: trace where threads run, what they wait for and who
  *   wakes them" (phoenix-rtos-kernel, 2026-10-06): it records none of these events.
  *
@@ -59,6 +61,7 @@
 static struct {
 	uint32_t port;
 	volatile int busyStop;
+	volatile int drainStop;
 	volatile unsigned long busyCount;
 	volatile int busyTid, clientTid, serverTid;
 	int sendErr;
@@ -73,7 +76,8 @@ static struct {
 typedef struct {
 	unsigned int busySamples, busyInLoop;
 	int sendFound, recvFound, waitFound, wakeFound;
-	uint32_t mid, sendTs, waitTs, wakeTs;
+	uint32_t mid, sendTs, wakeTs, waitBlocked;
+	uint8_t waitFlags;
 	uint64_t waitArg0, waitLr;
 	int recvTid, waker, wakeCause;
 } prof_result_t;
@@ -177,7 +181,7 @@ static size_t prof_evSize(uint8_t id, const uint8_t *p, size_t avail)
 		return (avail < 12U) ? 0U : prof_urecEnd(p, avail, 12U + (size_t)p[11] * 8U);
 	}
 	if (id == EV_WAIT) {
-		return (avail < 44U) ? 0U : prof_urecEnd(p, avail, 44U + (size_t)p[43] * 8U);
+		return (avail < 48U) ? 0U : prof_urecEnd(p, avail, 48U + (size_t)p[47] * 8U);
 	}
 	if ((id >= sizeof(fixed)) || (fixed[id] == 0U) || (avail < fixed[id])) {
 		return 0;
@@ -228,10 +232,12 @@ static void prof_parse(prof_result_t *r, int pass)
 					r->recvTid = rd16(p);
 				}
 				else if ((id == EV_WAIT) && (rd16(p) == (uint16_t)prof_common.clientTid) && (ts >= r->sendTs) && (r->waitFound == 0)) {
-					size_t u = 44U + (size_t)p[43] * 8U;
+					/* deferred (waitMinUs): written when the wait ended, with its length */
+					size_t u = 48U + (size_t)p[47] * 8U;
 					r->waitFound = 1;
-					r->waitTs = ts;
-					r->waitArg0 = rd64(p + 11);
+					r->waitFlags = p[2];
+					r->waitBlocked = rd32(p + 11);
+					r->waitArg0 = rd64(p + 15);
 					r->waitLr = rd64(p + u + 8U);
 				}
 				else if ((id == EV_WAKEUP) && (rd16(p) == (uint16_t)prof_common.clientTid) && (ts >= r->sendTs) && (ts >= r->wakeTs)) {
@@ -247,10 +253,14 @@ static void prof_parse(prof_result_t *r, int pass)
 }
 
 
+/*
+ * One pass over the channels, at most 64 reads (4 MB) of each so that it ends while tracing.
+ * Returns the bytes read, or a negative error.
+ */
 static int prof_drain(void)
 {
 	uint8_t *buf = malloc(1U << 16), *n;
-	int c, got;
+	int c, got = 0, k, total = 0;
 
 	if (buf == NULL) {
 		return -ENOMEM;
@@ -259,7 +269,7 @@ static int prof_drain(void)
 	memset(buf, 0, 1U << 16);
 
 	for (c = 0; c < prof_common.nchans; c++) {
-		while ((got = perf_read(perf_mode_trace, buf, 1U << 16, c)) > 0) {
+		for (k = 0; (k < 64) && ((got = perf_read(perf_mode_trace, buf, 1U << 16, c)) > 0); k++) {
 			n = realloc(prof_common.chan[c], prof_common.chanLen[c] + (size_t)got);
 			if (n == NULL) {
 				free(buf);
@@ -268,6 +278,7 @@ static int prof_drain(void)
 			memcpy(n + prof_common.chanLen[c], buf, (size_t)got);
 			prof_common.chan[c] = n;
 			prof_common.chanLen[c] += (size_t)got;
+			total += got;
 		}
 		if (got < 0) {
 			free(buf);
@@ -277,7 +288,22 @@ static int prof_drain(void)
 
 	free(buf);
 
-	return 0;
+	return total;
+}
+
+
+/* Reads the trace while it is recorded: a channel that fills up loses events */
+static void *prof_drainThread(void *arg)
+{
+	(void)arg;
+	while (prof_common.drainStop == 0) {
+		if (prof_drain() < 0) {
+			break;
+		}
+		usleep(20 * 1000);
+	}
+
+	return NULL;
 }
 
 
@@ -286,8 +312,9 @@ static int prof_record(prof_result_t *r)
 {
 	static int recorded = 0;
 	static prof_result_t result;
-	perf_trace_cfg_t cfg = { .samplePeriodUs = 1000, .depth = 8, .sampleStack = 0, .waitStack = 0 };
-	pthread_t busy, server, client;
+	/* as prof records by default: waits of 1 ms or longer, written when they end */
+	perf_trace_cfg_t cfg = { .samplePeriodUs = 1000, .depth = 8, .sampleStack = 0, .waitStack = 0, .waitMinUs = 1000 };
+	pthread_t busy, server, client, drainer;
 	int ret;
 
 	if (recorded != 0) {
@@ -306,6 +333,8 @@ static int prof_record(prof_result_t *r)
 	prof_common.nchans = (ret < PROF_NCHANS_MAX) ? ret : PROF_NCHANS_MAX;
 
 	prof_common.busyStop = 0;
+	prof_common.drainStop = 0;
+	TEST_ASSERT_EQUAL_INT(0, pthread_create(&drainer, NULL, prof_drainThread, NULL));
 	TEST_ASSERT_EQUAL_INT(0, pthread_create(&server, NULL, prof_serverThread, NULL));
 	TEST_ASSERT_EQUAL_INT(0, pthread_create(&busy, NULL, prof_busyThread, NULL));
 	usleep(20 * 1000);
@@ -319,8 +348,10 @@ static int prof_record(prof_result_t *r)
 	pthread_join(server, NULL);
 
 	ret = perf_stop(perf_mode_trace);
-	if (ret >= 0) {
-		ret = prof_drain();
+	prof_common.drainStop = 1;
+	pthread_join(drainer, NULL);
+	/* stopped: the channels no longer grow */
+	while ((ret >= 0) && ((ret = prof_drain()) > 0)) {
 	}
 	(void)perf_finish(perf_mode_trace);
 	portDestroy(prof_common.port);
@@ -383,7 +414,8 @@ TEST(prof_sampling, blocked_send_attributed)
 	TEST_ASSERT_MESSAGE(r.wakeFound != 0, "no thread_wakeup of the client");
 	TEST_ASSERT_EQUAL_INT_MESSAGE(prof_common.serverTid, r.waker, "the client was not woken by the server");
 	TEST_ASSERT_EQUAL_INT_MESSAGE(0, r.wakeCause, "thread_wakeup cause is not an explicit wakeup");
-	TEST_ASSERT_MESSAGE(r.wakeTs - r.waitTs >= (uint32_t)(PROF_HOLD_MS - 50) * 1000U, "blocked time shorter than the server held the request");
+	TEST_ASSERT_MESSAGE((r.waitFlags & 2U) != 0U, "thread_wait of the client is not a deferred one (waitMinUs)");
+	TEST_ASSERT_MESSAGE(r.waitBlocked >= (uint32_t)(PROF_HOLD_MS - 50) * 1000U, "blocked time shorter than the server held the request");
 }
 
 
