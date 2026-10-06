@@ -104,6 +104,11 @@ test:
       targets:
         value: [aarch64a53-zynqmp-qemu, armv7r5f-zynqmp-qemu]
 
+    - name: unix-poll-wake
+      execute: test-libc-unix-poll-wake
+      targets:
+        exclude: [armv7a9-zynq7000-qemu, aarch64a53-zynqmp-qemu, armv7r5f-zynqmp-qemu]
+
     - name: inet-socket
       execute: test-libc-inet-socket
       targets:
