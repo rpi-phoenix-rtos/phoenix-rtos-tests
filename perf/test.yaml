@@ -1,0 +1,11 @@
+test:
+  type: unity
+  tests:
+    - name: prof_sampling
+      execute: test-prof-sampling
+      targets:
+        # thread sampling needs HAL_PERF_FRAMES (aarch64) and the in-memory trace buffer
+        value: [
+          aarch64a72-generic-rpi4b,
+          aarch64a53-zynqmp-qemu
+        ]
