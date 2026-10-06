@@ -15,7 +15,8 @@
  *    - seqpacket_process:  the same with the receiver in a forked child
  *    - seqpacket_and_pipe: the receiver polls the socket AND a pipe (GLib's
  *                          wake-up pipe); the pipe's own wake latency is reported
- *                          as pipe_* (posixsrv does not notify: 0-20 ms quantum)
+ *                          as pipe_* (0-20 ms quantum unless posixsrv notifies,
+ *                          see pipe_poll_wake below)
  *    - stream_fds, dgram_fds, seqpacket_fds: each type, an fd on every 10th message
  *    - two_writers:        two threads send to the same socket at once
  *    - burst:              64 messages back to back, drained in a recvmsg() loop
@@ -33,6 +34,35 @@
  *    20 ms: such a wake came from the kernel's fallback timer, i.e. a notify was
  *    lost).
  *    `--count N` changes the number of messages per case (default 5000).
+ *
+ * The same question for a PIPE as the ready descriptor (group pipe_poll_wake,
+ * same `UPW case=...` lines). A pipe is served by posixsrv, so poll() learns of
+ * its readiness from an atPollStatus query; it wakes at once only when posixsrv
+ * calls pollNotify() on the change, otherwise the kernel re-asks every
+ * POLL_INTERVAL (20 ms). GLib wakes its main loops through a pipe, so this is
+ * the cost of every cross-thread dispatch to a GLib main loop (WebKit's sync IPC).
+ *
+ *    TESTED:
+ *    - pipe_thread:     8-byte timestamp tokens, writer thread, 0.2-2 ms gaps
+ *    - pipe_process:    the same with the writer in a forked child
+ *    - pipe_and_unix:   the receiver polls the pipe AND an idle AF_UNIX socket
+ *                       (the GLib shape: a mixed set); only the pipe is written
+ *    - pipe_pollout:    a writer waits for POLLOUT on a full pipe, the reader
+ *                       drains 4 kB (latency = drain -> poll() return)
+ *    - pipe_hup:        a reader waits for POLLIN, the last writer closes:
+ *                       POLLHUP, then read() = 0
+ *    - pipe_hup_writer: a writer waits for POLLOUT on a full pipe, the last
+ *                       reader closes: POLLHUP or POLLERR, then write() = EPIPE
+ *
+ *    FAILS when a token is lost or malformed, a wake takes more than 1 s, a wake
+ *    reports the wrong events, or p99 latency is >= 5 ms (UPW_PIPE_P99_US). That
+ *    bound sits far below POLL_INTERVAL: it holds only if every pipe readiness
+ *    change wakes poll() at once.
+ *
+ *    EXPECTED on a posixsrv that does NOT call pollNotify() (build 39 and older):
+ *    EVERY pipe case FAILS, with p50 ~8-12 ms and max ~20 ms (the fallback
+ *    re-query: a uniform 0-20 ms quantum). With the notify: p50 well under 1 ms
+ *    (two posixsrv round trips), all PASS. The pipe token count is --count / 5.
  *
  * Copyright 2026 Phoenix Systems
  *
@@ -73,6 +103,11 @@
 #define UPW_CROWD       4
 #define UPW_MAX_SPIN    16
 #define UPW_FILL_SIZE   4000 /* seqpacket_pollout: WebKit's messageMaxSize is 4096 */
+#define UPW_PIPE_P99_US 5000U /* pipe cases: p99 wake latency must stay below this */
+#define UPW_PIPE_REPS   50    /* pipe_pollout, pipe_hup*: transitions measured */
+#define UPW_PIPE_ARM_US 5000U /* time given to a poller to fall asleep before the change */
+#define UPW_PIPE_CHUNK  512   /* pipe fill granule (PIPE_BUF) */
+#define UPW_PIPE_DRAIN  4096  /* pipe_pollout: bytes the reader frees (a Linux pipe needs a whole page) */
 
 
 typedef struct {
@@ -1175,6 +1210,537 @@ TEST(unix_poll_wake, seqpacket_pollout)
 }
 
 
+/* ---- pipe_poll_wake: a pipe is the descriptor that becomes ready ---------- */
+
+
+typedef struct {
+	const char *name;
+	int fork;     /* the writer is a forked child */
+	int withUnix; /* the receiver also polls an AF_UNIX socket nobody writes to */
+} upw_pipeCase_t;
+
+
+typedef struct {
+	int wr;
+	unsigned count;
+	unsigned seed;
+	unsigned sent;
+	int err;
+} upw_pipeTx_t;
+
+
+typedef struct {
+	unsigned recv;
+	unsigned bad;
+	unsigned wakes;
+	unsigned emptyWakes;
+	unsigned rxErrs;
+	unsigned unixWakes;
+	int eof;
+	int timedOut;
+	unsigned latCap;
+	uint32_t *lat;
+} upw_pipeRx_t;
+
+
+typedef struct {
+	int fd;
+	short events;
+	volatile int armed;
+	int rc;
+	short revents;
+	int64_t wokeNs;
+} upw_pipeWaiter_t;
+
+
+enum { upw_pipePollout, upw_pipeHup, upw_pipeHupWriter };
+
+
+static struct sigaction upw_oldSigpipe;
+
+
+static unsigned upw_pipeCount(void)
+{
+	unsigned n = upw_common.count / 5U;
+
+	return (n < 2U) ? 2U : n;
+}
+
+
+/* Writes `count` CLOCK_MONOTONIC tokens, 0.2-2 ms apart, to a blocking write end. */
+static void upw_pipeSend(upw_pipeTx_t *tx)
+{
+	int64_t token;
+	unsigned i;
+	ssize_t r;
+
+	for (i = 0; i < tx->count; ++i) {
+		upw_sleepUs(200U + (unsigned)rand_r(&tx->seed) % 1801U);
+		token = upw_nowNs();
+		do {
+			r = write(tx->wr, &token, sizeof(token));
+		} while ((r < 0) && (errno == EINTR));
+		if (r != (ssize_t)sizeof(token)) {
+			tx->err = (r < 0) ? errno : EIO;
+			return;
+		}
+		tx->sent++;
+	}
+}
+
+
+static void *upw_pipeSendThread(void *arg)
+{
+	upw_pipeSend(arg);
+	return NULL;
+}
+
+
+/* Reads every queued token from the non-blocking read end; returns the number read. */
+static int upw_pipeDrain(upw_pipeRx_t *rx, int rd, int64_t wakeNs, unsigned char *buf, size_t *have)
+{
+	int64_t token;
+	ssize_t r;
+	int got = 0;
+
+	for (;;) {
+		r = read(rd, buf + *have, 512U - *have);
+		if (r < 0) {
+			if (errno == EINTR) {
+				continue;
+			}
+			if ((errno != EAGAIN) && (errno != EWOULDBLOCK)) {
+				rx->rxErrs++;
+			}
+			return got;
+		}
+		if (r == 0) {
+			rx->eof = 1;
+			return got;
+		}
+
+		*have += (size_t)r;
+		while (*have >= sizeof(token)) {
+			memcpy(&token, buf, sizeof(token));
+			if ((token <= 0) || (token > upw_nowNs())) {
+				rx->bad++;
+			}
+			else {
+				if (rx->recv < rx->latCap) {
+					rx->lat[rx->recv] = upw_latUs(wakeNs, token);
+				}
+				rx->recv++;
+			}
+			got++;
+			*have -= sizeof(token);
+			memmove(buf, buf + sizeof(token), *have);
+		}
+	}
+}
+
+
+/* poll() on the read end (and the idle socket, if any) until `expected` tokens arrived. */
+static void upw_pipeReceive(upw_pipeRx_t *rx, int rd, int idleSock, unsigned expected)
+{
+	struct pollfd pfd[2];
+	unsigned char buf[512];
+	size_t have = 0;
+	nfds_t n = 0, pi;
+	int64_t wakeNs;
+	int r;
+
+	if (idleSock >= 0) {
+		pfd[n].fd = idleSock;
+		pfd[n].events = POLLIN;
+		n++;
+	}
+	pi = n;
+	pfd[n].fd = rd;
+	pfd[n].events = POLLIN;
+	n++;
+
+	while ((rx->recv + rx->bad < expected) && (rx->eof == 0)) {
+		pfd[0].revents = 0;
+		pfd[1].revents = 0;
+		r = poll(pfd, n, UPW_SETTLE_MS);
+		wakeNs = upw_nowNs();
+		if (r < 0) {
+			if (errno == EINTR) {
+				continue;
+			}
+			rx->rxErrs++;
+			break;
+		}
+		if (r == 0) {
+			rx->timedOut = 1;
+			break;
+		}
+		rx->wakes++;
+		if ((pi > 0U) && (pfd[0].revents != 0)) {
+			/* nobody writes to it: a spurious event, and a busy loop if it persists */
+			rx->unixWakes++;
+			break;
+		}
+		if ((pfd[pi].revents & (POLLERR | POLLNVAL)) != 0) {
+			rx->rxErrs++;
+			break;
+		}
+		if (upw_pipeDrain(rx, rd, wakeNs, buf, &have) == 0) {
+			rx->emptyWakes++;
+		}
+	}
+}
+
+
+static void upw_pipeCheck(const upw_pipeCase_t *c)
+{
+	int p[2] = { -1, -1 }, sv[2] = { -1, -1 };
+	unsigned expected = upw_pipeCount(), n, i, ge10ms = 0, ge15ms = 0, gt1s = 0, p50, p99, maxUs;
+	upw_pipeTx_t tx;
+	upw_pipeRx_t rx;
+	pthread_t tid;
+	pid_t pid = -1;
+	int status = 0, ok, complete;
+	int64_t t0 = upw_nowNs();
+
+	memset(&tx, 0, sizeof(tx));
+	memset(&rx, 0, sizeof(rx));
+
+	TEST_ASSERT_EQUAL_INT(0, pipe(p));
+	TEST_ASSERT_EQUAL_INT(0, fcntl(p[0], F_SETFL, fcntl(p[0], F_GETFL) | O_NONBLOCK));
+	if (c->withUnix != 0) {
+		TEST_ASSERT_EQUAL_INT(0, socketpair(AF_UNIX, SOCK_SEQPACKET, 0, sv));
+	}
+	rx.latCap = expected;
+	rx.lat = calloc(expected, sizeof(uint32_t));
+	TEST_ASSERT_NOT_NULL(rx.lat);
+
+	tx.wr = p[1];
+	tx.count = expected;
+	tx.seed = 0x50495045U;
+
+	if (c->fork != 0) {
+		fflush(stdout);
+		pid = fork();
+		TEST_ASSERT_TRUE_MESSAGE(pid >= 0, "fork");
+		if (pid == 0) {
+			close(p[0]);
+			upw_pipeSend(&tx);
+			_exit((tx.err == 0) ? 0 : 1);
+		}
+		/* the child holds the write end now: its exit is the end of the stream */
+		close(p[1]);
+		p[1] = -1;
+	}
+	else {
+		TEST_ASSERT_EQUAL_INT(0, pthread_create(&tid, NULL, upw_pipeSendThread, &tx));
+	}
+
+	upw_pipeReceive(&rx, p[0], sv[1], expected);
+	complete = (rx.recv == expected) ? 1 : 0;
+
+	if (complete == 0) {
+		/* a writer blocked on a full pipe gets EPIPE (SIGPIPE is ignored) */
+		close(p[0]);
+		p[0] = -1;
+	}
+	if (c->fork != 0) {
+		if (complete == 0) {
+			kill(pid, SIGKILL);
+		}
+		(void)waitpid(pid, &status, 0);
+		tx.sent = (complete != 0) ? expected : 0U;
+		if ((complete != 0) && (!WIFEXITED(status) || (WEXITSTATUS(status) != 0))) {
+			tx.err = ECHILD;
+		}
+	}
+	else {
+		pthread_join(tid, NULL);
+	}
+
+	n = (rx.recv < rx.latCap) ? rx.recv : rx.latCap;
+	for (i = 0; i < n; ++i) {
+		ge10ms += (rx.lat[i] >= UPW_LATE_US) ? 1U : 0U;
+		ge15ms += (rx.lat[i] >= UPW_STRICT_US) ? 1U : 0U;
+		gt1s += (rx.lat[i] > UPW_FAIL_US) ? 1U : 0U;
+	}
+	qsort(rx.lat, n, sizeof(rx.lat[0]), upw_cmpU32);
+	p50 = upw_pct(rx.lat, n, 50);
+	p99 = upw_pct(rx.lat, n, 99);
+	maxUs = (n > 0U) ? rx.lat[n - 1U] : 0U;
+	free(rx.lat);
+
+	for (i = 0; i < 2U; ++i) {
+		if (p[i] >= 0) {
+			close(p[i]);
+		}
+		if (sv[i] >= 0) {
+			close(sv[i]);
+		}
+	}
+
+	printf("UPW case=%s expected=%u sent=%u recv=%u bad=%u wakes=%u empty_wakes=%u p50_us=%u p99_us=%u max_us=%u "
+		   "ge10ms=%u ge15ms=%u gt1s=%u rx_timeout=%d rx_errs=%u eof=%d tx_err=%d",
+		c->name, expected, tx.sent, rx.recv, rx.bad, rx.wakes, rx.emptyWakes, p50, p99, maxUs, ge10ms, ge15ms, gt1s,
+		rx.timedOut, rx.rxErrs, rx.eof, tx.err);
+	if (c->withUnix != 0) {
+		printf(" unix_wakes=%u", rx.unixWakes);
+	}
+	printf(" elapsed_ms=%lld\n", (long long)((upw_nowNs() - t0) / 1000000LL));
+
+	ok = (complete != 0) && (tx.err == 0) && (rx.bad == 0U) && (rx.rxErrs == 0U) && (rx.unixWakes == 0U) &&
+		(gt1s == 0U) && (p99 < UPW_PIPE_P99_US);
+	printf("UPW case=%s verdict=%s\n", c->name, (ok != 0) ? "PASS" : "FAIL");
+	fflush(stdout);
+
+	TEST_ASSERT_EQUAL_INT_MESSAGE(0, tx.err, "write() to the pipe failed (errno)");
+	TEST_ASSERT_EQUAL_INT_MESSAGE(0, rx.timedOut, "no token for 5 s");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(0, rx.bad, "malformed tokens");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(0, rx.rxErrs, "poll()/read() failed");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(0, rx.unixWakes, "poll() reported the idle AF_UNIX socket");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(expected, rx.recv, "not every token arrived");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(0, gt1s, "a pipe wake took more than 1 s");
+	TEST_ASSERT_TRUE_MESSAGE(p99 < UPW_PIPE_P99_US, "pipe p99 wake >= 5 ms: pipe readiness does not wake poll()");
+}
+
+
+static void *upw_pipeWaitThread(void *arg)
+{
+	upw_pipeWaiter_t *w = arg;
+	struct pollfd pfd = { .fd = w->fd, .events = w->events, .revents = 0 };
+
+	__atomic_store_n(&w->armed, 1, __ATOMIC_RELEASE);
+	w->rc = poll(&pfd, 1, 3000);
+	w->wokeNs = upw_nowNs();
+	w->revents = pfd.revents;
+	return NULL;
+}
+
+
+/* Fills a pipe through its non-blocking write end; returns the bytes queued. */
+static size_t upw_pipeFill(int wr)
+{
+	static const char chunk[UPW_PIPE_CHUNK];
+	size_t queued = 0;
+	ssize_t r;
+
+	while (queued < (1U << 20)) {
+		r = write(wr, chunk, sizeof(chunk));
+		if (r <= 0) {
+			break;
+		}
+		queued += (size_t)r;
+	}
+	return queued;
+}
+
+
+/*
+ * One readiness change at a time, UPW_PIPE_REPS times: a thread sleeps in
+ * poll() on one end of a fresh pipe and the main thread changes the other end.
+ */
+static void upw_pipeTransition(const char *name, int kind)
+{
+	static char buf[UPW_PIPE_DRAIN]; /* off the 12 kB main stack */
+	uint32_t lat[UPW_PIPE_REPS];
+	unsigned rep, n = 0, timeouts = 0, badEvents = 0, badAfter = 0, setupErrs = 0, ge10ms = 0, p50, p99, maxUs, i;
+	upw_pipeWaiter_t w;
+	pthread_t tid;
+	int64_t changeNs;
+	ssize_t r;
+	int p[2], ok;
+	short want;
+
+	for (rep = 0; rep < UPW_PIPE_REPS; ++rep) {
+		if (pipe(p) != 0) {
+			setupErrs++;
+			break;
+		}
+
+		memset(&w, 0, sizeof(w));
+		if (kind == upw_pipeHup) {
+			w.fd = p[0];
+			w.events = POLLIN;
+		}
+		else {
+			if ((fcntl(p[1], F_SETFL, fcntl(p[1], F_GETFL) | O_NONBLOCK) != 0) || (upw_pipeFill(p[1]) == 0U)) {
+				setupErrs++;
+				close(p[0]);
+				close(p[1]);
+				continue;
+			}
+			w.fd = p[1];
+			w.events = POLLOUT;
+		}
+
+		if (pthread_create(&tid, NULL, upw_pipeWaitThread, &w) != 0) {
+			setupErrs++;
+			close(p[0]);
+			close(p[1]);
+			break;
+		}
+		(void)upw_waitFlag(&w.armed, 1000);
+		upw_sleepUs(UPW_PIPE_ARM_US);
+
+		changeNs = upw_nowNs();
+		switch (kind) {
+			case upw_pipePollout:
+				if (read(p[0], buf, sizeof(buf)) != (ssize_t)sizeof(buf)) {
+					setupErrs++;
+				}
+				break;
+			case upw_pipeHup:
+				close(p[1]);
+				p[1] = -1;
+				break;
+			default:
+				close(p[0]);
+				p[0] = -1;
+				break;
+		}
+		pthread_join(tid, NULL);
+
+		if (w.rc == 0) {
+			/* 3 s each: two are enough to know */
+			timeouts++;
+		}
+		else if (w.rc != 1) {
+			badEvents++;
+		}
+		else {
+			lat[n++] = upw_latUs(w.wokeNs, changeNs);
+
+			want = (kind == upw_pipePollout) ? POLLOUT : ((kind == upw_pipeHup) ? POLLHUP : (POLLHUP | POLLERR));
+			if ((w.revents & want) == 0) {
+				badEvents++;
+			}
+		}
+
+		if (kind == upw_pipeHup) {
+			/* the last writer is gone: end of file, not EAGAIN and not a block */
+			if (read(p[0], buf, 1) != 0) {
+				badAfter++;
+			}
+		}
+		else if (kind == upw_pipeHupWriter) {
+			/* the last reader is gone: EPIPE (SIGPIPE is ignored for the group) */
+			r = write(p[1], buf, 1);
+			if ((r >= 0) || (errno != EPIPE)) {
+				badAfter++;
+			}
+		}
+
+		if (p[0] >= 0) {
+			close(p[0]);
+		}
+		if (p[1] >= 0) {
+			close(p[1]);
+		}
+
+		if (timeouts >= 2U) {
+			break;
+		}
+	}
+
+	for (i = 0; i < n; ++i) {
+		ge10ms += (lat[i] >= UPW_LATE_US) ? 1U : 0U;
+	}
+	qsort(lat, n, sizeof(lat[0]), upw_cmpU32);
+	p50 = upw_pct(lat, n, 50);
+	p99 = upw_pct(lat, n, 99);
+	maxUs = (n > 0U) ? lat[n - 1U] : 0U;
+
+	printf("UPW case=%s reps=%u woken=%u p50_us=%u p99_us=%u max_us=%u ge10ms=%u timeouts=%u bad_events=%u bad_after=%u setup_errs=%u\n",
+		name, UPW_PIPE_REPS, n, p50, p99, maxUs, ge10ms, timeouts, badEvents, badAfter, setupErrs);
+	ok = (n == UPW_PIPE_REPS) && (timeouts == 0U) && (badEvents == 0U) && (badAfter == 0U) && (setupErrs == 0U) &&
+		(maxUs <= UPW_FAIL_US) && (p99 < UPW_PIPE_P99_US);
+	printf("UPW case=%s verdict=%s\n", name, (ok != 0) ? "PASS" : "FAIL");
+	fflush(stdout);
+
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(0, setupErrs, "could not set the pipe up (pipe/fcntl/fill/read)");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(0, timeouts, "the change never woke poll() (3 s)");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(0, badEvents, "poll() failed or reported the wrong events");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(0, badAfter, "the end did not behave as reported (EOF / EPIPE)");
+	TEST_ASSERT_TRUE_MESSAGE(maxUs <= UPW_FAIL_US, "a pipe wake took more than 1 s");
+	TEST_ASSERT_TRUE_MESSAGE(p99 < UPW_PIPE_P99_US, "pipe p99 wake >= 5 ms: pipe readiness does not wake poll()");
+}
+
+
+TEST_GROUP(pipe_poll_wake);
+
+
+TEST_SETUP(pipe_poll_wake)
+{
+	struct sigaction sa;
+
+	/* a failed case closes the read end under a blocked writer: EPIPE, not death */
+	memset(&sa, 0, sizeof(sa));
+	sa.sa_handler = SIG_IGN;
+	sigemptyset(&sa.sa_mask);
+	(void)sigaction(SIGPIPE, &sa, &upw_oldSigpipe);
+}
+
+
+TEST_TEAR_DOWN(pipe_poll_wake)
+{
+	(void)sigaction(SIGPIPE, &upw_oldSigpipe, NULL);
+}
+
+
+TEST(pipe_poll_wake, pipe_thread)
+{
+	static const upw_pipeCase_t c = { .name = "pipe_thread" };
+
+	upw_pipeCheck(&c);
+}
+
+
+TEST(pipe_poll_wake, pipe_process)
+{
+	static const upw_pipeCase_t c = { .name = "pipe_process", .fork = 1 };
+
+	upw_pipeCheck(&c);
+}
+
+
+/* The GLib shape: a main loop's wake-up pipe next to an IPC socket. */
+TEST(pipe_poll_wake, pipe_and_unix)
+{
+	static const upw_pipeCase_t c = { .name = "pipe_and_unix", .withUnix = 1 };
+
+	upw_pipeCheck(&c);
+}
+
+
+TEST(pipe_poll_wake, pipe_pollout)
+{
+	upw_pipeTransition("pipe_pollout", upw_pipePollout);
+}
+
+
+TEST(pipe_poll_wake, pipe_hup)
+{
+	upw_pipeTransition("pipe_hup", upw_pipeHup);
+}
+
+
+TEST(pipe_poll_wake, pipe_hup_writer)
+{
+	upw_pipeTransition("pipe_hup_writer", upw_pipeHupWriter);
+}
+
+
+TEST_GROUP_RUNNER(pipe_poll_wake)
+{
+	RUN_TEST_CASE(pipe_poll_wake, pipe_thread);
+	RUN_TEST_CASE(pipe_poll_wake, pipe_process);
+	RUN_TEST_CASE(pipe_poll_wake, pipe_and_unix);
+	RUN_TEST_CASE(pipe_poll_wake, pipe_pollout);
+	RUN_TEST_CASE(pipe_poll_wake, pipe_hup);
+	RUN_TEST_CASE(pipe_poll_wake, pipe_hup_writer);
+}
+
+
 TEST_GROUP_RUNNER(unix_poll_wake)
 {
 	RUN_TEST_CASE(unix_poll_wake, seqpacket_thread);
@@ -1194,6 +1760,7 @@ TEST_GROUP_RUNNER(unix_poll_wake)
 static void runner(void)
 {
 	RUN_TEST_GROUP(unix_poll_wake);
+	RUN_TEST_GROUP(pipe_poll_wake);
 }
 
 
