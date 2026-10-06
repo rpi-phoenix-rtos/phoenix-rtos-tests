@@ -53,6 +53,9 @@
  *                       POLLHUP, then read() = 0
  *    - pipe_hup_writer: a writer waits for POLLOUT on a full pipe, the last
  *                       reader closes: POLLHUP or POLLERR, then write() = EPIPE
+ *    - pty_slave_in:    the same for a pty (posixsrv too): a reader polls a raw
+ *                       slave, one byte is written to the master
+ *    - pty_master_in:   a reader polls the master, one byte is written to the slave
  *
  *    FAILS when a token is lost or malformed, a wake takes more than 1 s, a wake
  *    reports the wrong events, or p99 latency is >= 5 ms (UPW_PIPE_P99_US). That
@@ -60,7 +63,7 @@
  *    change wakes poll() at once.
  *
  *    EXPECTED on a posixsrv that does NOT call pollNotify() (build 39 and older):
- *    EVERY pipe case FAILS, with p50 ~8-12 ms and max ~20 ms (the fallback
+ *    EVERY pipe and pty case FAILS, with p50 ~8-15 ms and max ~20 ms (the fallback
  *    re-query: a uniform 0-20 ms quantum). With the notify: p50 well under 1 ms
  *    (two posixsrv round trips), all PASS. The pipe token count is --count / 5.
  *
@@ -82,6 +85,7 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <termios.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
 
@@ -1666,6 +1670,99 @@ static void upw_pipeTransition(const char *name, int kind)
 }
 
 
+/*
+ * A pty is posixsrv's other poll()able object: bash, psh and a terminal emulator
+ * poll its ends. UPW_PIPE_REPS times, a thread sleeps in poll(POLLIN) on one end
+ * and the main thread writes one byte to the other (the slave is raw, so a byte
+ * is a whole read and nothing is echoed).
+ */
+static void upw_ptyTransition(const char *name, int pollSlave)
+{
+	uint32_t lat[UPW_PIPE_REPS];
+	unsigned rep, n = 0, timeouts = 0, badEvents = 0, badAfter = 0, setupErrs = 0, ge10ms = 0, p50, p99, maxUs;
+	upw_pipeWaiter_t w;
+	struct termios tio;
+	pthread_t tid;
+	int64_t changeNs;
+	const char *pts;
+	int master, slave, ok;
+	char ch;
+
+	master = open("/dev/ptmx", O_RDWR | O_NOCTTY);
+	if (master < 0) {
+		TEST_IGNORE_MESSAGE("no /dev/ptmx");
+	}
+	pts = ((grantpt(master) == 0) && (unlockpt(master) == 0)) ? ptsname(master) : NULL;
+	slave = (pts != NULL) ? open(pts, O_RDWR | O_NOCTTY) : -1;
+	if ((slave < 0) || (tcgetattr(slave, &tio) != 0)) {
+		close(master);
+		if (slave >= 0) {
+			close(slave);
+		}
+		TEST_FAIL_MESSAGE("could not open the pty slave");
+	}
+	cfmakeraw(&tio);
+	tio.c_cc[VMIN] = 1;
+	tio.c_cc[VTIME] = 0;
+	TEST_ASSERT_EQUAL_INT(0, tcsetattr(slave, TCSANOW, &tio));
+
+	for (rep = 0; (rep < UPW_PIPE_REPS) && (timeouts < 2U); ++rep) {
+		memset(&w, 0, sizeof(w));
+		w.fd = (pollSlave != 0) ? slave : master;
+		w.events = POLLIN;
+		if (pthread_create(&tid, NULL, upw_pipeWaitThread, &w) != 0) {
+			setupErrs++;
+			break;
+		}
+		(void)upw_waitFlag(&w.armed, 1000);
+		upw_sleepUs(UPW_PIPE_ARM_US);
+
+		changeNs = upw_nowNs();
+		if (write((pollSlave != 0) ? master : slave, "x", 1) != 1) {
+			setupErrs++;
+		}
+		pthread_join(tid, NULL);
+
+		if (w.rc == 0) {
+			timeouts++;
+		}
+		else if ((w.rc != 1) || ((w.revents & POLLIN) == 0)) {
+			badEvents++;
+		}
+		else {
+			lat[n++] = upw_latUs(w.wokeNs, changeNs);
+			if ((read(w.fd, &ch, 1) != 1) || (ch != 'x')) {
+				badAfter++;
+			}
+		}
+	}
+	close(slave);
+	close(master);
+
+	for (rep = 0; rep < n; ++rep) {
+		ge10ms += (lat[rep] >= UPW_LATE_US) ? 1U : 0U;
+	}
+	qsort(lat, n, sizeof(lat[0]), upw_cmpU32);
+	p50 = upw_pct(lat, n, 50);
+	p99 = upw_pct(lat, n, 99);
+	maxUs = (n > 0U) ? lat[n - 1U] : 0U;
+
+	printf("UPW case=%s reps=%u woken=%u p50_us=%u p99_us=%u max_us=%u ge10ms=%u timeouts=%u bad_events=%u bad_after=%u setup_errs=%u\n",
+		name, UPW_PIPE_REPS, n, p50, p99, maxUs, ge10ms, timeouts, badEvents, badAfter, setupErrs);
+	ok = (n == UPW_PIPE_REPS) && (timeouts == 0U) && (badEvents == 0U) && (badAfter == 0U) && (setupErrs == 0U) &&
+		(maxUs <= UPW_FAIL_US) && (p99 < UPW_PIPE_P99_US);
+	printf("UPW case=%s verdict=%s\n", name, (ok != 0) ? "PASS" : "FAIL");
+	fflush(stdout);
+
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(0, setupErrs, "could not write to the pty");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(0, timeouts, "the byte never woke poll() (3 s)");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(0, badEvents, "poll() failed or did not report POLLIN");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(0, badAfter, "the byte could not be read back");
+	TEST_ASSERT_TRUE_MESSAGE(maxUs <= UPW_FAIL_US, "a pty wake took more than 1 s");
+	TEST_ASSERT_TRUE_MESSAGE(p99 < UPW_PIPE_P99_US, "pty p99 wake >= 5 ms: pty readiness does not wake poll()");
+}
+
+
 TEST_GROUP(pipe_poll_wake);
 
 
@@ -1730,6 +1827,18 @@ TEST(pipe_poll_wake, pipe_hup_writer)
 }
 
 
+TEST(pipe_poll_wake, pty_slave_in)
+{
+	upw_ptyTransition("pty_slave_in", 1);
+}
+
+
+TEST(pipe_poll_wake, pty_master_in)
+{
+	upw_ptyTransition("pty_master_in", 0);
+}
+
+
 TEST_GROUP_RUNNER(pipe_poll_wake)
 {
 	RUN_TEST_CASE(pipe_poll_wake, pipe_thread);
@@ -1738,6 +1847,8 @@ TEST_GROUP_RUNNER(pipe_poll_wake)
 	RUN_TEST_CASE(pipe_poll_wake, pipe_pollout);
 	RUN_TEST_CASE(pipe_poll_wake, pipe_hup);
 	RUN_TEST_CASE(pipe_poll_wake, pipe_hup_writer);
+	RUN_TEST_CASE(pipe_poll_wake, pty_slave_in);
+	RUN_TEST_CASE(pipe_poll_wake, pty_master_in);
 }
 
 
