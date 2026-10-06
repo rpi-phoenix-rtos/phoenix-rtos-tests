@@ -9,3 +9,4 @@
 $(eval $(call add_test, test_fs))
 $(eval $(call add_test, test_fcntl))
 $(eval $(call add_test, test_sparse))
+$(eval $(call add_test, test_bigwrite))
