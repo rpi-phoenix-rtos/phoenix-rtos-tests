@@ -114,6 +114,12 @@ test:
       targets:
         value: [ia32-generic-qemu, armv7a7-imx6ull-evk, host-generic-pc]
 
+    # Needs the network stack (lwip): TCP over its loopback interface
+    - name: inet-loopback-tcp
+      execute: test-libc-inet-loopback-tcp
+      targets:
+        value: [ia32-generic-qemu, armv7a7-imx6ull-evk, aarch64a72-generic-rpi4b, host-generic-pc]
+
     # Needs the network stack (lwip) and the shipped /etc/hosts
     - name: netdb
       execute: test-libc-netdb
