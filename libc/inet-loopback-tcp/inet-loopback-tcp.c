@@ -12,9 +12,9 @@
  * On Phoenix each inet socket is served by its own thread of the lwip process
  * and every call is a message to it; poll() on one inet socket lets that thread
  * block until the socket is ready (posix_poll's single-inet-socket path). A
- * call that blocks there must not hold up the socket's other calls: before
- * build 45 one blocked accept() or recv() stalled every later call on the same
- * socket -- even getsockname() -- until it returned.
+ * call that blocks there must not hold up the socket's other calls: a server
+ * thread that serves them one at a time leaves every later call on the socket
+ * -- even getsockname() -- waiting for the blocked accept() or recv() to return.
  *
  *    TESTED:
  *    - single_thread_nonblocking: O_NONBLOCK connect, poll(listener, POLLIN),
@@ -38,6 +38,11 @@
  *      while another thread sends on the SAME socket, then the reply arrives
  *    - poll_while_other_thread_recvs: one thread blocks in recv() while another
  *      polls the same socket with a 300 ms timeout
+ *    - big_send_with_concurrent_calls: one thread sends 1 MB in ONE blocking
+ *      send() -- far more than the send buffer, so it waits for the reader --
+ *      while another thread sends 64 kB and calls getsockname()/getsockopt()
+ *      on the same socket; the reader must get each send's bytes contiguous
+ *      and in order, nothing lost or interleaved
  *
  *    FAILS on any error, and -- instead of hanging -- when a case makes no
  *    progress for WATCHDOG_S seconds: a watchdog thread prints the case and the
@@ -676,6 +681,97 @@ TEST(inet_loopback_tcp, poll_while_other_thread_recvs)
 }
 
 
+#define BIG_SEND   (1024 * 1024)
+#define SMALL_SEND (64 * 1024)
+
+struct sender {
+	pthread_t thread;
+	int sock;
+	const unsigned char *buf;
+	size_t len;
+	volatile ssize_t n;
+	volatile int err;
+};
+
+
+static void *sender_thread(void *arg)
+{
+	struct sender *t = arg;
+
+	t->n = send(t->sock, t->buf, t->len, 0);
+	t->err = (t->n < 0) ? errno : 0;
+	return NULL;
+}
+
+
+TEST(inet_loopback_tcp, big_send_with_concurrent_calls)
+{
+	static unsigned char big[BIG_SEND], small[SMALL_SEND], got[BIG_SEND + SMALL_SEND];
+	struct sender t;
+	struct sockaddr_in name;
+	socklen_t len;
+	size_t i, total, at;
+	ssize_t n;
+	int l, c, a, type;
+
+	watchdog_arm("big_send_with_concurrent_calls");
+	for (i = 0; i < sizeof(big); i++) {
+		big[i] = (unsigned char)(i * 7 + (i >> 11));
+	}
+	memset(small, 0xA5, sizeof(small));
+	connected_pair(&l, &c, &a);
+
+	/* One blocking send() of 1 MB: it waits for the reader, who has not started */
+	memset(&t, 0, sizeof(t));
+	t.sock = c;
+	t.buf = big;
+	t.len = sizeof(big);
+	TEST_ASSERT_EQUAL_INT(0, pthread_create(&t.thread, NULL, sender_thread, &t));
+	usleep(200 * 1000);
+
+	step("getsockname/getsockopt during a blocked send()");
+	len = sizeof(name);
+	TEST_ASSERT_EQUAL_INT(0, getsockname(c, (struct sockaddr *)&name, &len));
+	len = sizeof(type);
+	TEST_ASSERT_EQUAL_INT(0, getsockopt(c, SOL_SOCKET, SO_TYPE, &type, &len));
+	TEST_ASSERT_EQUAL_INT(SOCK_STREAM, type);
+
+	/* A second sender on the same socket: its bytes may come before or after
+	 * the 1 MB, but must not land inside it */
+	step("drain while a second send() runs");
+	{
+		struct sender t2;
+		memset(&t2, 0, sizeof(t2));
+		t2.sock = c;
+		t2.buf = small;
+		t2.len = sizeof(small);
+		TEST_ASSERT_EQUAL_INT(0, pthread_create(&t2.thread, NULL, sender_thread, &t2));
+
+		total = 0;
+		while (total < sizeof(got)) {
+			n = recv(a, got + total, sizeof(got) - total, 0);
+			TEST_ASSERT_TRUE(n > 0);
+			total += (size_t)n;
+		}
+		TEST_ASSERT_EQUAL_INT(0, pthread_join(t2.thread, NULL));
+		TEST_ASSERT_EQUAL_INT(0, t2.err);
+		TEST_ASSERT_EQUAL_INT((int)sizeof(small), (int)t2.n);
+	}
+	TEST_ASSERT_EQUAL_INT(0, pthread_join(t.thread, NULL));
+	TEST_ASSERT_EQUAL_INT(0, t.err);
+	TEST_ASSERT_EQUAL_INT((int)sizeof(big), (int)t.n);
+
+	step("verify the stream");
+	at = (got[0] == 0xA5) ? sizeof(small) : 0; /* where the 1 MB starts */
+	TEST_ASSERT_EQUAL_MEMORY(big, got + at, sizeof(big));
+	TEST_ASSERT_EQUAL_MEMORY(small, got + ((at == 0) ? sizeof(big) : 0), sizeof(small));
+
+	close(a);
+	close(c);
+	close(l);
+}
+
+
 TEST_GROUP_RUNNER(inet_loopback_tcp)
 {
 	RUN_TEST_CASE(inet_loopback_tcp, single_thread_nonblocking);
@@ -686,6 +782,7 @@ TEST_GROUP_RUNNER(inet_loopback_tcp)
 	RUN_TEST_CASE(inet_loopback_tcp, ops_on_listener_during_accept);
 	RUN_TEST_CASE(inet_loopback_tcp, send_while_peer_thread_recvs);
 	RUN_TEST_CASE(inet_loopback_tcp, poll_while_other_thread_recvs);
+	RUN_TEST_CASE(inet_loopback_tcp, big_send_with_concurrent_calls);
 }
 
 
