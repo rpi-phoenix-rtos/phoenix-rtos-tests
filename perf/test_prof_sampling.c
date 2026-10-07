@@ -19,6 +19,8 @@
  *     its user lr, and thread_wakeup the server as the waker. The trace records waits of 1 ms or
  *     more when they end (waitMinUs, as prof does), so the wait carries its length: at least the
  *     time the server held the request. The trace is read while it records, as prof does.
+ *   prof_sampling.kernel_entry_attributed - the kernel-mode samples of a thread looping over mmap(),
+ *     a page fault and munmap() name their entry: the syscall or the exception (ESR.EC 0x24).
  *   prof_sampling.idle_volume - prof's default recording of an idle system for 2 s stays under
  *     PROF_IDLE_BUDGET and loses no event (trace_stats); build 39 recorded 78 MB in 5 s and lost
  *     34954 events before event classes (perf_trace_cfg_t.events) existed.
@@ -40,6 +42,7 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <sys/mman.h>
 #include <sys/msg.h>
 #include <sys/perf.h>
 #include <sys/threads.h>
@@ -64,6 +67,13 @@
 #define EV_RESPOND 0x45
 #define EV_STATS   0x46
 
+/* thread_sample payload offsets */
+#define SAMPLE_MODE    2U
+#define SAMPLE_SYSCALL 20U
+#define SAMPLE_ECLASS  22U
+#define SAMPLE_NK      31U
+#define SAMPLE_KFRAMES 32U
+
 /* thread_wait payload offsets */
 #define WAIT_FLAGS   2U
 #define WAIT_BLOCKED 11U
@@ -81,6 +91,8 @@ static struct {
 	uint32_t port;
 	volatile int busyStop;
 	volatile int drainStop;
+	volatile int kernelStop;
+	volatile int kernelTid;
 	volatile unsigned long busyCount;
 	volatile int busyTid, clientTid, serverTid;
 	int sendErr;
@@ -198,7 +210,7 @@ static size_t prof_evSize(uint8_t id, const uint8_t *p, size_t avail)
 	};
 
 	if (id == EV_SAMPLE) {
-		return (avail < 12U) ? 0U : prof_urecEnd(p, avail, 12U + (size_t)p[11] * 8U);
+		return (avail < SAMPLE_KFRAMES) ? 0U : prof_urecEnd(p, avail, SAMPLE_KFRAMES + (size_t)p[SAMPLE_NK] * 8U);
 	}
 	if (id == EV_WAIT) {
 		return (avail < WAIT_KFRAMES) ? 0U : prof_urecEnd(p, avail, WAIT_KFRAMES + (size_t)p[WAIT_NK] * 8U);
@@ -239,7 +251,7 @@ static void prof_parse(prof_result_t *r, int pass)
 				}
 				else if ((id == EV_SAMPLE) && (rd16(p) == (uint16_t)prof_common.busyTid) && (p[2] == 0U)) {
 					/* user part after the kernel frames: pc first */
-					uint64_t pc = rd64(p + 12U + (size_t)p[11] * 8U);
+					uint64_t pc = rd64(p + SAMPLE_KFRAMES + (size_t)p[SAMPLE_NK] * 8U);
 					r->busySamples++;
 					if ((pc >= loop) && (pc < loop + PROF_FN_SPAN)) {
 						r->busyInLoop++;
@@ -449,7 +461,7 @@ TEST(prof_sampling, blocked_send_attributed)
 TEST(prof_sampling, idle_volume)
 {
 	perf_trace_cfg_t cfg = { .samplePeriodUs = 2000, .depth = 16, .sampleStack = 512, .waitStack = 512, .waitMinUs = 1000,
-		.events = PERF_TRACE_EV_PROFILE };
+		.events = PERF_TRACE_EV_PROFILE, .waitStackMinUs = 10000 };
 	uint64_t bytes[256] = { 0 }, total = 0;
 	uint32_t discarded = 0, dropped = 0;
 	pthread_t drainer;
@@ -516,10 +528,102 @@ TEST(prof_sampling, idle_volume)
 }
 
 
+/* Spends its time in the kernel: mmap, a page fault on the new page, munmap */
+static void *prof_kernelThread(void *arg)
+{
+	volatile char *page;
+
+	(void)arg;
+	prof_common.kernelTid = gettid();
+	while (prof_common.kernelStop == 0) {
+		page = mmap(NULL, 4 * 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+		if (page == MAP_FAILED) {
+			break;
+		}
+		page[0] = 1;
+		page[3 * 4096] = 1;
+		munmap((void *)page, 4 * 4096);
+	}
+
+	return NULL;
+}
+
+
+/*
+ * A sample taken in the kernel says why the thread is there: the syscall (from the SVC before its
+ * user pc) or the exception it entered with (a page fault: ESR.EC 0x24).
+ */
+TEST(prof_sampling, kernel_entry_attributed)
+{
+	perf_trace_cfg_t cfg = { .samplePeriodUs = 1000, .depth = 8, .sampleStack = 0, .waitStack = 0, .waitMinUs = 1000,
+		.events = PERF_TRACE_EV_PROFILE };
+	unsigned int kernel = 0, known = 0, memory = 0;
+	pthread_t thread, drainer;
+	int ret, c;
+	size_t o, sz;
+
+	for (c = 0; c < PROF_NCHANS_MAX; c++) {
+		free(prof_common.chan[c]);
+		prof_common.chan[c] = NULL;
+		prof_common.chanLen[c] = 0;
+	}
+
+	ret = perf_start(perf_mode_trace, PERF_TRACE_FLAG_SAMPLE, &cfg, sizeof(cfg));
+	TEST_ASSERT_GREATER_OR_EQUAL_INT_MESSAGE(0, ret, "perf_start failed (another trace running?)");
+	prof_common.nchans = (ret < PROF_NCHANS_MAX) ? ret : PROF_NCHANS_MAX;
+
+	prof_common.drainStop = 0;
+	prof_common.kernelStop = 0;
+	TEST_ASSERT_EQUAL_INT(0, pthread_create(&drainer, NULL, prof_drainThread, NULL));
+	TEST_ASSERT_EQUAL_INT(0, pthread_create(&thread, NULL, prof_kernelThread, NULL));
+	usleep(PROF_HOLD_MS * 1000);
+	prof_common.kernelStop = 1;
+	pthread_join(thread, NULL);
+
+	ret = perf_stop(perf_mode_trace);
+	prof_common.drainStop = 1;
+	pthread_join(drainer, NULL);
+	while ((ret >= 0) && ((ret = prof_drain()) > 0)) {
+	}
+	(void)perf_finish(perf_mode_trace);
+	TEST_ASSERT_GREATER_OR_EQUAL_INT(0, ret);
+
+	for (c = 0; c < prof_common.nchans; c++) {
+		for (o = 0; o + 5U <= prof_common.chanLen[c]; o += 5U + sz) {
+			const uint8_t *p = prof_common.chan[c] + o + 5U;
+			uint8_t id = prof_common.chan[c][o + 4U];
+			unsigned int sc;
+
+			sz = prof_evSize(id, p, prof_common.chanLen[c] - o - 5U);
+			if (sz == 0U) {
+				break;
+			}
+			if ((id != EV_SAMPLE) || (rd16(p) != (uint16_t)prof_common.kernelTid) || (p[SAMPLE_MODE] != 1U)) {
+				continue;
+			}
+			kernel++;
+			sc = rd16(p + SAMPLE_SYSCALL);
+			if ((sc != 0xffffU) || (p[SAMPLE_ECLASS] != 0xffU)) {
+				known++;
+			}
+			if ((sc == prof_sc_sys_mmap) || (sc == prof_sc_sys_munmap) || (p[SAMPLE_ECLASS] == 0x24U)) {
+				memory++;
+			}
+		}
+	}
+
+	TEST_ASSERT_MESSAGE(kernel >= 10U, "too few kernel-mode samples of a thread that lives in mmap/munmap");
+	/* a user thread enters the kernel only by a syscall or an exception: (nearly) every sample names it */
+	TEST_ASSERT_MESSAGE(known * 10U >= kernel * 9U, "kernel-mode samples without their syscall or exception");
+	TEST_ASSERT_MESSAGE(memory * 2U >= kernel, "kernel time not attributed to mmap/munmap or the page fault");
+}
+
+
 TEST_GROUP_RUNNER(prof_sampling)
 {
 	RUN_TEST_CASE(prof_sampling, busy_loop_attributed);
 	RUN_TEST_CASE(prof_sampling, blocked_send_attributed);
+	RUN_TEST_CASE(prof_sampling, kernel_entry_attributed);
 	RUN_TEST_CASE(prof_sampling, idle_volume);
 }
 
