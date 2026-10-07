@@ -15,8 +15,7 @@
  *    - seqpacket_process:  the same with the receiver in a forked child
  *    - seqpacket_and_pipe: the receiver polls the socket AND a pipe (GLib's
  *                          wake-up pipe); the pipe's own wake latency is reported
- *                          as pipe_* (0-20 ms quantum unless posixsrv notifies,
- *                          see pipe_poll_wake below)
+ *                          as pipe_* (see pipe_poll_wake below)
  *    - stream_fds, dgram_fds, seqpacket_fds: each type, an fd on every 10th message
  *    - two_writers:        two threads send to the same socket at once
  *    - burst:              64 messages back to back, drained in a recvmsg() loop
@@ -36,11 +35,13 @@
  *    `--count N` changes the number of messages per case (default 5000).
  *
  * The same question for a PIPE as the ready descriptor (group pipe_poll_wake,
- * same `UPW case=...` lines). A pipe is served by posixsrv, so poll() learns of
- * its readiness from an atPollStatus query; it wakes at once only when posixsrv
- * calls pollNotify() on the change, otherwise the kernel re-asks every
- * POLL_INTERVAL (20 ms). GLib wakes its main loops through a pipe, so this is
- * the cost of every cross-thread dispatch to a GLib main loop (WebKit's sync IPC).
+ * same `UPW case=...` lines). GLib wakes its main loops through a pipe, so this
+ * is the cost of every cross-thread dispatch to a GLib main loop (WebKit's sync
+ * IPC). Anonymous pipes live in the kernel (posix/pipe.c), and each state change
+ * of one wakes the poll() sets that watch it. They used to be posixsrv objects:
+ * poll() learnt of their readiness from an atPollStatus query, and woke at once
+ * only when posixsrv called pollNotify() on the change - otherwise the kernel
+ * re-asked every POLL_INTERVAL (20 ms). A pty is still served by posixsrv.
  *
  *    TESTED:
  *    - pipe_thread:     8-byte timestamp tokens, writer thread, 0.2-2 ms gaps
@@ -69,7 +70,8 @@
  *    EXPECTED on a posixsrv that does NOT call pollNotify() (build 39 and older):
  *    EVERY pipe and pty case FAILS, with p50 ~8-15 ms and max ~20 ms (the fallback
  *    re-query: a uniform 0-20 ms quantum). With the notify: p50 well under 1 ms
- *    (two posixsrv round trips), all PASS. The pipe token count is --count / 5.
+ *    (two posixsrv round trips), all PASS; kernel pipes need no round trip at all.
+ *    The pipe token count is --count / 5.
  *
  * Copyright 2026 Phoenix Systems
  *
