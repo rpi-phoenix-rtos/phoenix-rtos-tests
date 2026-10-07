@@ -16,11 +16,14 @@
  *     the same size, a rewrite of one page, a rewrite to a smaller and to a larger size, a
  *     replacement by rename() and a removal and re-creation under the same name;
  *   - memory_pressure_evicts_cache: cached pages count as free memory and are given up when it
- *     runs out -- a child process can allocate and touch (almost) all of the free memory meminfo
- *     reports, cached file included, and the file still reads back correctly afterwards.
+ *     runs out -- with a file cached that is larger than what is left to everybody else
+ *     (max(256 MiB, 10%) of free memory), a child can allocate and touch the rest of the free
+ *     memory meminfo reports; afterwards all of it is free again, 1 and 4 MiB contiguous blocks
+ *     can be had, a new process can allocate 512 MiB, and the file reads back correctly.
  *
  * Environment: OBJCACHE_DIR (directory of the test file, default /root), OBJCACHE_MIB (size of
- * the test file in MiB, default 96).
+ * the test file in MiB, default 96), OBJCACHE_PRESSURE_MIB (size of the file of the memory
+ * pressure test, default 512).
  *
  * Copyright 2026 Phoenix Systems
  *
@@ -52,11 +55,21 @@
 /* The memory pressure child maps its memory in pieces of this size */
 #define CHUNK (64UL * MIB)
 
+/* Default size of the file the memory pressure test caches: above MARGIN_MIN and 10% of RAM */
+#define DEFAULT_PRESSURE_MIB 512UL
+
+/* Free memory the memory pressure test leaves to everybody else: at least this, or 10% of it */
+#define MARGIN_MIN (256ULL * MIB)
+
+/* Kernel heap the memory pressure child may leave grown */
+#define LEAK_TOLERANCE (64ULL * MIB)
+
 
 static struct {
 	char path[256];
 	char tmppath[256];
 	size_t size;
+	size_t pressureSize;
 	size_t pagesz;
 	unsigned char *buf;
 } common;
@@ -217,7 +230,8 @@ TEST_SETUP(test_objcache)
 {
 	const char *dir = getenv("OBJCACHE_DIR");
 	const char *mib = getenv("OBJCACHE_MIB");
-	unsigned long n = DEFAULT_MIB;
+	const char *pmib = getenv("OBJCACHE_PRESSURE_MIB");
+	unsigned long n = DEFAULT_MIB, pn = DEFAULT_PRESSURE_MIB;
 
 	if ((dir == NULL) || (dir[0] == '\0')) {
 		dir = "/root";
@@ -229,9 +243,17 @@ TEST_SETUP(test_objcache)
 		}
 	}
 
+	if ((pmib != NULL) && (pmib[0] != '\0')) {
+		pn = strtoul(pmib, NULL, 10);
+		if (pn == 0UL) {
+			pn = DEFAULT_PRESSURE_MIB;
+		}
+	}
+
 	snprintf(common.path, sizeof(common.path), "%s/objcache_test.bin", dir);
 	snprintf(common.tmppath, sizeof(common.tmppath), "%s/objcache_test.tmp", dir);
 	common.size = n * MIB;
+	common.pressureSize = pn * MIB;
 	common.pagesz = (size_t)sysconf(_SC_PAGESIZE);
 
 	common.buf = malloc(MIB);
@@ -327,42 +349,62 @@ TEST(test_objcache, replaced_file_is_seen)
 }
 
 
-TEST(test_objcache, memory_pressure_evicts_cache)
+/* The longest run of free pages, from the kernel's page map (cached file pages count as used there) */
+static unsigned long long largestFreeRun(void)
 {
-	expect_t e = { .seed = 8, .page = (size_t)-1 };
-	unsigned long long freesz, margin, target, done;
-	uint64_t us, start;
+	static pageinfo_t map[65536];
+	meminfo_t info;
+	unsigned long long run = 0, best = 0;
+	addr_t next = 0;
+	int i, n;
+
+	memset(&info, 0, sizeof(info));
+	info.page.mapsz = (int)(sizeof(map) / sizeof(map[0]));
+	info.page.map = map;
+	info.entry.mapsz = -1;
+	info.entry.kmapsz = -1;
+	info.maps.mapsz = -1;
+	meminfo(&info);
+
+	n = (info.page.mapsz < (int)(sizeof(map) / sizeof(map[0]))) ? info.page.mapsz : (int)(sizeof(map) / sizeof(map[0]));
+	for (i = 0; i < n; ++i) {
+		if ((map[i].marker == '.') && (run != 0U) && (map[i].addr == next)) {
+			run += (unsigned long long)map[i].count * common.pagesz;
+		}
+		else {
+			run = (map[i].marker == '.') ? ((unsigned long long)map[i].count * common.pagesz) : 0U;
+		}
+		next = map[i].addr + ((addr_t)map[i].count * common.pagesz);
+		best = (run > best) ? run : best;
+	}
+
+	return best;
+}
+
+
+/*
+ * In a child: maps len bytes of anonymous memory in pieces and writes and reads back every page.
+ * Returns the child's exit status (a page that cannot be had kills it at the fault).
+ */
+static int touchInChild(unsigned long long len)
+{
+	unsigned long long done;
 	unsigned char *m;
-	size_t i, chunk;
+	size_t i, chunk = 0;
 	pid_t pid;
-	int status;
+	int status = -1;
 
-	writeFile(common.path, common.size, e.seed);
-	TEST_ASSERT_EQUAL_UINT(0, mapCheck(common.path, common.size, &e, &us));
-
-	/* With the cache, the file's pages are now kept, and meminfo counts them as free. Leave less
-	 * than the file's size to everybody else: the child can only get its memory if the cached
-	 * pages are given up. */
-	freesz = freeBytes();
-	margin = common.size / 2U;
-	TEST_ASSERT_GREATER_THAN_UINT64_MESSAGE(margin + common.size, freesz, "not enough free memory for the test");
-	target = (freesz - margin) & ~((unsigned long long)common.pagesz - 1ULL);
-
-	printf("objcache: free %llu MiB, child allocates and touches %llu MiB\n", freesz / MIB, target / MIB);
-
-	start = now_us();
 	pid = fork();
 	TEST_ASSERT_GREATER_OR_EQUAL_INT(0, pid);
 	if (pid == 0) {
-		/* In chunks: an entry's amap covers the whole entry, and one for gigabytes would be a
+		/* In pieces: an entry's amap covers the whole entry, and one for gigabytes would be a
 		 * multi-megabyte contiguous kernel allocation, failing for reasons of its own */
-		for (done = 0; done < target; done += chunk) {
-			chunk = ((target - done) < CHUNK) ? (size_t)(target - done) : CHUNK;
+		for (done = 0; done < len; done += chunk) {
+			chunk = ((len - done) < CHUNK) ? (size_t)(len - done) : CHUNK;
 			m = mmap(NULL, chunk, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 			if (m == MAP_FAILED) {
 				_exit(2);
 			}
-			/* A page that cannot be had kills the child at the fault */
 			for (i = 0; i < chunk; i += common.pagesz) {
 				m[i] = (unsigned char)((done + i) / common.pagesz);
 			}
@@ -376,12 +418,73 @@ TEST(test_objcache, memory_pressure_evicts_cache)
 	}
 
 	TEST_ASSERT_EQUAL_INT(pid, waitpid(pid, &status, 0));
-	printf("objcache: child took %llu ms, status 0x%x\n", (unsigned long long)((now_us() - start) / 1000U), (unsigned int)status);
+
+	return status;
+}
+
+
+/* Maps and unmaps len bytes of physically contiguous memory (what shmsrv and kmalloc zones need) */
+static int contiguousOk(size_t len)
+{
+	void *m = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_CONTIGUOUS, -1, 0);
+
+	if (m == MAP_FAILED) {
+		return 0;
+	}
+	(void)munmap(m, len);
+
+	return 1;
+}
+
+
+TEST(test_objcache, memory_pressure_evicts_cache)
+{
+	expect_t e = { .seed = 8, .page = (size_t)-1 };
+	unsigned long long before, after, margin, target;
+	uint64_t us, start;
+	int status;
+
+	/* Free memory left to everybody else, kernel overhead of the child's memory included (an
+	 * anonymous page costs the kernel ~3% more in anon_t and page tables) */
+	before = freeBytes();
+	margin = before / 10U;
+	margin = (margin < MARGIN_MIN) ? MARGIN_MIN : margin;
+	if ((unsigned long long)common.pressureSize <= margin) {
+		TEST_IGNORE_MESSAGE("OBJCACHE_PRESSURE_MIB is not above the free memory left to others: nothing to prove");
+	}
+
+	/* With the cache the file's pages are kept and meminfo counts them as free: the child's
+	 * allocation below reaches into them, and succeeds only if they are given up */
+	writeFile(common.path, common.pressureSize, e.seed);
+	TEST_ASSERT_EQUAL_UINT(0, mapCheck(common.path, common.pressureSize, &e, &us));
+
+	before = freeBytes();
+	TEST_ASSERT_GREATER_THAN_UINT64_MESSAGE(margin + common.pressureSize, before, "not enough free memory for the test");
+	target = (before - margin) & ~((unsigned long long)common.pagesz - 1ULL);
+
+	printf("objcache: %zu MiB file cached, free %llu MiB (largest free block %llu MiB), child allocates and touches %llu MiB\n",
+		common.pressureSize / MIB, before / MIB, largestFreeRun() / MIB, target / MIB);
+
+	start = now_us();
+	status = touchInChild(target);
+	after = freeBytes();
+	printf("objcache: child took %llu ms, status 0x%x; free %llu MiB (largest free block %llu MiB)\n",
+		(unsigned long long)((now_us() - start) / 1000U), (unsigned int)status, after / MIB, largestFreeRun() / MIB);
 	TEST_ASSERT_TRUE_MESSAGE(WIFEXITED(status), "the child was killed: an allocation failed");
 	TEST_ASSERT_EQUAL_INT_MESSAGE(0, WEXITSTATUS(status), "the child could not get its memory");
 
+	/* Everything comes back: the child's memory, and what was evicted is free memory now */
+	TEST_ASSERT_GREATER_OR_EQUAL_UINT64_MESSAGE(before - LEAK_TOLERANCE, after, "memory was not given back after the child");
+
+	/* And memory is usable afterwards: by a new process, and in one piece (shmsrv and kmalloc
+	 * zones failed here with ENOMEM after the first version of this test) */
+	TEST_ASSERT_TRUE_MESSAGE(contiguousOk(1U * MIB), "no 1 MiB contiguous block after the child");
+	TEST_ASSERT_TRUE_MESSAGE(contiguousOk(4U * MIB), "no 4 MiB contiguous block after the child");
+	status = touchInChild(512ULL * MIB);
+	TEST_ASSERT_TRUE_MESSAGE(WIFEXITED(status) && (WEXITSTATUS(status) == 0), "a new process could not get 512 MiB after the child");
+
 	/* Whether the file was evicted or not, it reads back right */
-	TEST_ASSERT_EQUAL_UINT(0, mapCheck(common.path, common.size, &e, &us));
+	TEST_ASSERT_EQUAL_UINT(0, mapCheck(common.path, common.pressureSize, &e, &us));
 }
 
 
