@@ -438,17 +438,33 @@ static int touchInChild(unsigned long long len)
 }
 
 
-/* Free memory once it is back to at least want, or after 2 s: a process's memory may be given
- * back a little after waitpid() returns */
-static unsigned long long freeAgain(unsigned long long want)
+static unsigned long long now_ms(void)
 {
-	unsigned long long f = freeBytes();
-	int i;
+	return now_us() / 1000U;
+}
 
-	for (i = 0; (i < 20) && (f < want); ++i) {
+
+/* Free memory once it is back to at least want and has not changed for a second, at most after
+ * 30 s; *ms says how long that took. A process's memory may be given back a while after
+ * waitpid() returns: the kernel tells the parent first and then frees the address space, which
+ * for 3 GB (~800 000 pages and their anon_t) takes over 2 s on the Pi 4 -- a fixed 2 s wait saw
+ * ~470 MiB of it still on its way and called it a leak (builds 48 and 50). */
+static unsigned long long freeAgain(unsigned long long want, unsigned long long *ms)
+{
+	unsigned long long start = now_ms(), stable = start, f = freeBytes(), last;
+
+	for (;;) {
 		usleep(100000);
+		last = f;
 		f = freeBytes();
+		if (f != last) {
+			stable = now_ms();
+		}
+		if (((f >= want) && ((now_ms() - stable) >= 1000ULL)) || ((now_ms() - start) >= 30000ULL)) {
+			break;
+		}
 	}
+	*ms = now_ms() - start;
 
 	return f;
 }
@@ -471,7 +487,7 @@ static int contiguousOk(size_t len)
 TEST(test_objcache, memory_pressure_evicts_cache)
 {
 	expect_t e = { .seed = 8, .page = (size_t)-1 };
-	unsigned long long before, after, margin, target;
+	unsigned long long before, after, margin, target, ms;
 	uint64_t us, start;
 	int status;
 
@@ -503,9 +519,10 @@ TEST(test_objcache, memory_pressure_evicts_cache)
 
 	start = now_us();
 	status = touchInChild(target);
-	after = freeAgain(before - LEAK_TOLERANCE);
-	printf("objcache: child took %llu ms, status 0x%x; free %llu MiB (largest free block %llu MiB)\n",
-		(unsigned long long)((now_us() - start) / 1000U), (unsigned int)status, after / MIB, largestFreeRun() / MIB);
+	start = now_us() - start;
+	after = freeAgain(before - LEAK_TOLERANCE, &ms);
+	printf("objcache: child took %llu ms, status 0x%x; free %llu MiB after %llu ms (largest free block %llu MiB)\n",
+		(unsigned long long)(start / 1000U), (unsigned int)status, after / MIB, ms, largestFreeRun() / MIB);
 	TEST_ASSERT_TRUE_MESSAGE(WIFEXITED(status), "the child was killed: an allocation failed");
 	TEST_ASSERT_EQUAL_INT_MESSAGE(0, WEXITSTATUS(status), "the child could not get its memory");
 
@@ -526,7 +543,7 @@ TEST(test_objcache, memory_pressure_evicts_cache)
 
 TEST(test_objcache, killed_child_gives_memory_back)
 {
-	unsigned long long before, after;
+	unsigned long long before, after, ms;
 	volatile unsigned char *m;
 	size_t i, len = 256U * MIB;
 	pid_t pid;
@@ -553,9 +570,9 @@ TEST(test_objcache, killed_child_gives_memory_back)
 	}
 
 	TEST_ASSERT_EQUAL_INT(pid, waitpid(pid, &status, 0));
-	after = freeAgain(before - LEAK_KILLED);
-	printf("objcache: killed child (status 0x%x): free %llu MiB before, %llu MiB after\n", (unsigned int)status,
-		before / MIB, after / MIB);
+	after = freeAgain(before - LEAK_KILLED, &ms);
+	printf("objcache: killed child (status 0x%x): free %llu MiB before, %llu MiB after %llu ms\n", (unsigned int)status,
+		before / MIB, after / MIB, ms);
 	TEST_ASSERT_NOT_EQUAL_INT_MESSAGE(0, status, "the child was not killed");
 	TEST_ASSERT_GREATER_OR_EQUAL_UINT64_MESSAGE(before - LEAK_KILLED, after, "a killed process did not give its memory back");
 }
