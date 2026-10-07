@@ -21,9 +21,14 @@
  *     memory meminfo reports; afterwards all of it is free again, 1 and 4 MiB contiguous blocks
  *     can be had, a new process can allocate 512 MiB, and the file reads back correctly.
  *
+ *   - killed_child_gives_memory_back: a process killed at a fault after touching 256 MiB gives
+ *     its memory back (the kernel prints its Data Abort).
+ *
  * Environment: OBJCACHE_DIR (directory of the test file, default /root), OBJCACHE_MIB (size of
  * the test file in MiB, default 96), OBJCACHE_PRESSURE_MIB (size of the file of the memory
- * pressure test, default 512).
+ * pressure test, default 512), OBJCACHE_MARGIN_MIB (free memory the memory pressure test leaves
+ * to others, exactly; default max(256 MiB, 10%) -- a small value makes it use up memory, to
+ * compare kernels on what an exhaustion leaves behind).
  *
  * Copyright 2026 Phoenix Systems
  *
@@ -64,12 +69,16 @@
 /* Kernel heap the memory pressure child may leave grown */
 #define LEAK_TOLERANCE (64ULL * MIB)
 
+/* ... and the 256 MiB child killed at a fault */
+#define LEAK_KILLED (16ULL * MIB)
+
 
 static struct {
 	char path[256];
 	char tmppath[256];
 	size_t size;
 	size_t pressureSize;
+	unsigned long long marginMin;
 	size_t pagesz;
 	unsigned char *buf;
 } common;
@@ -231,6 +240,7 @@ TEST_SETUP(test_objcache)
 	const char *dir = getenv("OBJCACHE_DIR");
 	const char *mib = getenv("OBJCACHE_MIB");
 	const char *pmib = getenv("OBJCACHE_PRESSURE_MIB");
+	const char *mmib = getenv("OBJCACHE_MARGIN_MIB");
 	unsigned long n = DEFAULT_MIB, pn = DEFAULT_PRESSURE_MIB;
 
 	if ((dir == NULL) || (dir[0] == '\0')) {
@@ -254,6 +264,11 @@ TEST_SETUP(test_objcache)
 	snprintf(common.tmppath, sizeof(common.tmppath), "%s/objcache_test.tmp", dir);
 	common.size = n * MIB;
 	common.pressureSize = pn * MIB;
+	common.marginMin = MARGIN_MIN;
+	if ((mmib != NULL) && (mmib[0] != '\0')) {
+		/* Exact margin, 10% rule off: for runs that mean to use (nearly) all memory */
+		common.marginMin = (unsigned long long)strtoul(mmib, NULL, 10) * MIB;
+	}
 	common.pagesz = (size_t)sysconf(_SC_PAGESIZE);
 
 	common.buf = malloc(MIB);
@@ -423,6 +438,22 @@ static int touchInChild(unsigned long long len)
 }
 
 
+/* Free memory once it is back to at least want, or after 2 s: a process's memory may be given
+ * back a little after waitpid() returns */
+static unsigned long long freeAgain(unsigned long long want)
+{
+	unsigned long long f = freeBytes();
+	int i;
+
+	for (i = 0; (i < 20) && (f < want); ++i) {
+		usleep(100000);
+		f = freeBytes();
+	}
+
+	return f;
+}
+
+
 /* Maps and unmaps len bytes of physically contiguous memory (what shmsrv and kmalloc zones need) */
 static int contiguousOk(size_t len)
 {
@@ -447,8 +478,13 @@ TEST(test_objcache, memory_pressure_evicts_cache)
 	/* Free memory left to everybody else, kernel overhead of the child's memory included (an
 	 * anonymous page costs the kernel ~3% more in anon_t and page tables) */
 	before = freeBytes();
-	margin = before / 10U;
-	margin = (margin < MARGIN_MIN) ? MARGIN_MIN : margin;
+	if (common.marginMin != MARGIN_MIN) {
+		margin = common.marginMin;
+	}
+	else {
+		margin = before / 10U;
+		margin = (margin < MARGIN_MIN) ? MARGIN_MIN : margin;
+	}
 	if ((unsigned long long)common.pressureSize <= margin) {
 		TEST_IGNORE_MESSAGE("OBJCACHE_PRESSURE_MIB is not above the free memory left to others: nothing to prove");
 	}
@@ -462,12 +498,12 @@ TEST(test_objcache, memory_pressure_evicts_cache)
 	TEST_ASSERT_GREATER_THAN_UINT64_MESSAGE(margin + common.pressureSize, before, "not enough free memory for the test");
 	target = (before - margin) & ~((unsigned long long)common.pagesz - 1ULL);
 
-	printf("objcache: %zu MiB file cached, free %llu MiB (largest free block %llu MiB), child allocates and touches %llu MiB\n",
+	printf("objcache: %zu MiB file cached, free %llu MiB (largest free block, cache counted as used: %llu MiB), child allocates and touches %llu MiB\n",
 		common.pressureSize / MIB, before / MIB, largestFreeRun() / MIB, target / MIB);
 
 	start = now_us();
 	status = touchInChild(target);
-	after = freeBytes();
+	after = freeAgain(before - LEAK_TOLERANCE);
 	printf("objcache: child took %llu ms, status 0x%x; free %llu MiB (largest free block %llu MiB)\n",
 		(unsigned long long)((now_us() - start) / 1000U), (unsigned int)status, after / MIB, largestFreeRun() / MIB);
 	TEST_ASSERT_TRUE_MESSAGE(WIFEXITED(status), "the child was killed: an allocation failed");
@@ -488,12 +524,50 @@ TEST(test_objcache, memory_pressure_evicts_cache)
 }
 
 
+TEST(test_objcache, killed_child_gives_memory_back)
+{
+	unsigned long long before, after;
+	volatile unsigned char *m;
+	size_t i, len = 256U * MIB;
+	pid_t pid;
+	int status = 0;
+
+	/* A process killed at a fault (the way an allocation failure ends it) must give back what it
+	 * had, like one that exits. The kernel prints the child's Data Abort: expected. */
+	before = freeBytes();
+
+	pid = fork();
+	TEST_ASSERT_GREATER_OR_EQUAL_INT(0, pid);
+	if (pid == 0) {
+		m = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+		if (m == MAP_FAILED) {
+			_exit(2);
+		}
+		for (i = 0; i < len; i += common.pagesz) {
+			m[i] = 1U;
+		}
+		/* A store to a page no longer mapped: a Data Abort the kernel kills the child for */
+		(void)munmap((void *)m, common.pagesz);
+		m[0] = 1U;
+		_exit(0);
+	}
+
+	TEST_ASSERT_EQUAL_INT(pid, waitpid(pid, &status, 0));
+	after = freeAgain(before - LEAK_KILLED);
+	printf("objcache: killed child (status 0x%x): free %llu MiB before, %llu MiB after\n", (unsigned int)status,
+		before / MIB, after / MIB);
+	TEST_ASSERT_NOT_EQUAL_INT_MESSAGE(0, status, "the child was not killed");
+	TEST_ASSERT_GREATER_OR_EQUAL_UINT64_MESSAGE(before - LEAK_KILLED, after, "a killed process did not give its memory back");
+}
+
+
 TEST_GROUP_RUNNER(test_objcache)
 {
 	RUN_TEST_CASE(test_objcache, second_mapping_is_fast);
 	RUN_TEST_CASE(test_objcache, rewrite_same_size_is_seen);
 	RUN_TEST_CASE(test_objcache, rewrite_other_size_is_seen);
 	RUN_TEST_CASE(test_objcache, replaced_file_is_seen);
+	RUN_TEST_CASE(test_objcache, killed_child_gives_memory_back);
 	RUN_TEST_CASE(test_objcache, memory_pressure_evicts_cache);
 }
 
