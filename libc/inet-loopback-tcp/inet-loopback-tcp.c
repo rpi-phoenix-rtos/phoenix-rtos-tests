@@ -11,7 +11,10 @@
  *
  * On Phoenix each inet socket is served by its own thread of the lwip process
  * and every call is a message to it; poll() on one inet socket lets that thread
- * block until the socket is ready (posix_poll's single-inet-socket path).
+ * block until the socket is ready (posix_poll's single-inet-socket path). A
+ * call that blocks there must not hold up the socket's other calls: before
+ * build 45 one blocked accept() or recv() stalled every later call on the same
+ * socket -- even getsockname() -- until it returned.
  *
  *    TESTED:
  *    - single_thread_nonblocking: O_NONBLOCK connect, poll(listener, POLLIN),
@@ -24,6 +27,17 @@
  *    - poll_timeout_with_blocked_accept: a thread blocks in accept() on one
  *      listener while the main thread polls an idle connected socket with a
  *      300 ms timeout: poll() must return 0 after about 300 ms
+ *    - python_settimeout_connect: CPython 3.14's exact sequence for
+ *      `threading.Thread(target=s.accept)` + `c.settimeout(5)` +
+ *      `c.connect(s.getsockname())`: accept4(SOCK_CLOEXEC) blocks in a thread,
+ *      then socket(SOCK_CLOEXEC), ioctl(FIONBIO), getsockname() ON THE LISTENER,
+ *      connect() = EINPROGRESS, poll(POLLOUT | POLLERR, 5000), SO_ERROR
+ *    - ops_on_listener_during_accept: getsockname, getsockopt, fcntl(F_GETFL)
+ *      and a 0-timeout poll on a listener another thread is blocked accept()ing
+ *    - send_while_peer_thread_recvs: one thread blocks in recv() on a socket
+ *      while another thread sends on the SAME socket, then the reply arrives
+ *    - poll_while_other_thread_recvs: one thread blocks in recv() while another
+ *      polls the same socket with a 300 ms timeout
  *
  *    FAILS on any error, and -- instead of hanging -- when a case makes no
  *    progress for WATCHDOG_S seconds: a watchdog thread prints the case and the
@@ -180,6 +194,7 @@ struct server {
 	pthread_t thread;
 	int lsock;
 	int echo;
+	int cpython; /* accept4(SOCK_CLOEXEC) with an address buffer, as CPython */
 	volatile int accepted;
 	volatile int err;
 };
@@ -192,7 +207,14 @@ static void *server_thread(void *arg)
 	ssize_t n;
 	int c;
 
-	c = accept(srv->lsock, NULL, NULL);
+	if (srv->cpython != 0) {
+		struct sockaddr_in peer;
+		socklen_t plen = sizeof(peer);
+		c = accept4(srv->lsock, (struct sockaddr *)&peer, &plen, SOCK_CLOEXEC);
+	}
+	else {
+		c = accept(srv->lsock, NULL, NULL);
+	}
 	if (c < 0) {
 		srv->err = errno;
 		return NULL;
@@ -426,12 +448,244 @@ TEST(inet_loopback_tcp, poll_timeout_with_blocked_accept)
 }
 
 
+TEST(inet_loopback_tcp, python_settimeout_connect)
+{
+	struct server srv;
+	struct sockaddr_in addr;
+	socklen_t len, slen;
+	struct pollfd pfd;
+	unsigned int nb;
+	int l, c, err, serr;
+
+	watchdog_arm("python_settimeout_connect");
+
+	/* s = socket(); s.bind(("127.0.0.1", 0)); s.listen(1) */
+	step("listener");
+	l = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+	TEST_ASSERT_TRUE(l >= 0);
+	memset(&addr, 0, sizeof(addr));
+	addr.sin_family = AF_INET;
+	addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+	TEST_ASSERT_EQUAL_INT(0, bind(l, (struct sockaddr *)&addr, sizeof(addr)));
+	TEST_ASSERT_EQUAL_INT(0, listen(l, 1));
+
+	/* Thread(target=s.accept).start(); time.sleep(0.5) */
+	memset(&srv, 0, sizeof(srv));
+	srv.lsock = l;
+	srv.echo = 0;
+	srv.cpython = 1;
+	TEST_ASSERT_EQUAL_INT(0, pthread_create(&srv.thread, NULL, server_thread, &srv));
+	usleep(500 * 1000);
+
+	/* c = socket(); c.settimeout(5) -> internal_setblocking(): ioctl(FIONBIO) */
+	step("client socket(SOCK_CLOEXEC)");
+	c = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+	TEST_ASSERT_TRUE(c >= 0);
+	step("ioctl(FIONBIO)");
+	nb = 1;
+	TEST_ASSERT_EQUAL_INT(0, ioctl(c, FIONBIO, &nb));
+
+	/* c.connect(s.getsockname()): the address comes from the LISTENER, on
+	 * which the other thread is blocked in accept() */
+	step("getsockname(listener) while accept() blocks on it");
+	slen = sizeof(addr);
+	TEST_ASSERT_EQUAL_INT(0, getsockname(l, (struct sockaddr *)&addr, &slen));
+
+	/* internal_connect(): connect(), EINPROGRESS, then sock_call_ex() ->
+	 * internal_select() = poll(POLLOUT | POLLERR, 5000), then
+	 * sock_connect_impl() = getsockopt(SO_ERROR) */
+	step("connect");
+	err = connect(c, (struct sockaddr *)&addr, slen);
+	TEST_ASSERT_TRUE((err == 0) || (errno == EINPROGRESS));
+	if (err != 0) {
+		step("poll(POLLOUT | POLLERR, 5000)");
+		pfd.fd = c;
+		pfd.events = POLLOUT | POLLERR;
+		pfd.revents = 0;
+		TEST_ASSERT_EQUAL_INT(1, poll(&pfd, 1, 5000));
+		step("getsockopt(SO_ERROR)");
+		serr = -1;
+		len = sizeof(serr);
+		TEST_ASSERT_EQUAL_INT(0, getsockopt(c, SOL_SOCKET, SO_ERROR, &serr, &len));
+		TEST_ASSERT_EQUAL_INT(0, serr);
+	}
+
+	server_join(&srv);
+	close(c);
+	close(l);
+}
+
+
+TEST(inet_loopback_tcp, ops_on_listener_during_accept)
+{
+	struct server srv;
+	struct sockaddr_in addr, got;
+	struct pollfd pfd;
+	socklen_t len;
+	int l, c, type = 0;
+
+	watchdog_arm("ops_on_listener_during_accept");
+	l = listener(&addr);
+	server_start(&srv, l, 0);
+
+	step("getsockname(listener)");
+	len = sizeof(got);
+	TEST_ASSERT_EQUAL_INT(0, getsockname(l, (struct sockaddr *)&got, &len));
+	TEST_ASSERT_EQUAL_UINT16(addr.sin_port, got.sin_port);
+
+	step("getsockopt(listener, SO_TYPE)");
+	len = sizeof(type);
+	TEST_ASSERT_EQUAL_INT(0, getsockopt(l, SOL_SOCKET, SO_TYPE, &type, &len));
+	TEST_ASSERT_EQUAL_INT(SOCK_STREAM, type);
+
+	step("fcntl(listener, F_GETFL)");
+	TEST_ASSERT_TRUE(fcntl(l, F_GETFL) >= 0);
+
+	step("poll(listener, POLLIN, 0)");
+	pfd.fd = l;
+	pfd.events = POLLIN;
+	pfd.revents = 0;
+	TEST_ASSERT_EQUAL_INT(0, poll(&pfd, 1, 0));
+
+	step("connect to release the accept thread");
+	c = socket(AF_INET, SOCK_STREAM, 0);
+	TEST_ASSERT_TRUE(c >= 0);
+	TEST_ASSERT_EQUAL_INT(0, connect(c, (struct sockaddr *)&addr, sizeof(addr)));
+	server_join(&srv);
+
+	close(c);
+	close(l);
+}
+
+
+/* A connected pair made in one thread: *pc connected to *pa */
+static void connected_pair(int *pl, int *pc, int *pa)
+{
+	struct sockaddr_in addr;
+	int fl;
+
+	*pl = listener(&addr);
+	step("pair: connect");
+	*pc = socket(AF_INET, SOCK_STREAM, 0);
+	TEST_ASSERT_TRUE(*pc >= 0);
+	fl = fcntl(*pc, F_GETFL);
+	TEST_ASSERT_EQUAL_INT(0, fcntl(*pc, F_SETFL, fl | O_NONBLOCK));
+	TEST_ASSERT_TRUE((connect(*pc, (struct sockaddr *)&addr, sizeof(addr)) == 0) || (errno == EINPROGRESS));
+	step("pair: accept");
+	*pa = accept(*pl, NULL, NULL);
+	TEST_ASSERT_TRUE(*pa >= 0);
+	wait_connected(*pc);
+	TEST_ASSERT_EQUAL_INT(0, fcntl(*pc, F_SETFL, fl));
+}
+
+
+struct receiver {
+	pthread_t thread;
+	int sock;
+	volatile int started;
+	volatile ssize_t n;
+	volatile int err;
+	char buf[16];
+};
+
+
+static void *receiver_thread(void *arg)
+{
+	struct receiver *r = arg;
+
+	r->started = 1;
+	r->n = recv(r->sock, r->buf, sizeof(r->buf), 0);
+	r->err = (r->n < 0) ? errno : 0;
+	return NULL;
+}
+
+
+TEST(inet_loopback_tcp, send_while_peer_thread_recvs)
+{
+	struct receiver r;
+	int l, c, a;
+	char b;
+
+	watchdog_arm("send_while_peer_thread_recvs");
+	connected_pair(&l, &c, &a);
+
+	/* A thread blocks in recv(c); this thread sends on c, the peer echoes */
+	memset(&r, 0, sizeof(r));
+	r.sock = c;
+	TEST_ASSERT_EQUAL_INT(0, pthread_create(&r.thread, NULL, receiver_thread, &r));
+	usleep(100 * 1000);
+
+	step("send(c) while another thread blocks in recv(c)");
+	TEST_ASSERT_EQUAL_INT(1, (int)send(c, "q", 1, 0));
+	step("recv(a)");
+	TEST_ASSERT_EQUAL_INT(1, (int)recv(a, &b, 1, 0));
+	TEST_ASSERT_EQUAL_CHAR('q', b);
+	step("send(a): wakes the receiver");
+	TEST_ASSERT_EQUAL_INT(1, (int)send(a, "r", 1, 0));
+
+	step("join the receiver");
+	TEST_ASSERT_EQUAL_INT(0, pthread_join(r.thread, NULL));
+	TEST_ASSERT_EQUAL_INT(0, r.err);
+	TEST_ASSERT_EQUAL_INT(1, (int)r.n);
+	TEST_ASSERT_EQUAL_CHAR('r', r.buf[0]);
+
+	close(a);
+	close(c);
+	close(l);
+}
+
+
+TEST(inet_loopback_tcp, poll_while_other_thread_recvs)
+{
+	struct receiver r;
+	struct pollfd pfd;
+	time_t t0, dt;
+	int l, c, a;
+
+	watchdog_arm("poll_while_other_thread_recvs");
+	connected_pair(&l, &c, &a);
+
+	memset(&r, 0, sizeof(r));
+	r.sock = c;
+	TEST_ASSERT_EQUAL_INT(0, pthread_create(&r.thread, NULL, receiver_thread, &r));
+	usleep(100 * 1000);
+
+	step("poll(c, POLLOUT, 300) while another thread blocks in recv(c)");
+	pfd.fd = c;
+	pfd.events = POLLOUT;
+	pfd.revents = 0;
+	TEST_ASSERT_EQUAL_INT(1, poll(&pfd, 1, 300));
+
+	step("poll(c, POLLPRI, 300) while another thread blocks in recv(c)");
+	pfd.events = POLLPRI;
+	pfd.revents = 0;
+	t0 = now_ms();
+	TEST_ASSERT_EQUAL_INT(0, poll(&pfd, 1, 300));
+	dt = now_ms() - t0;
+	TEST_ASSERT_TRUE_MESSAGE(dt < 3000, "poll() overran its timeout by > 2.7 s");
+
+	step("send(a): wakes the receiver");
+	TEST_ASSERT_EQUAL_INT(1, (int)send(a, "s", 1, 0));
+	step("join the receiver");
+	TEST_ASSERT_EQUAL_INT(0, pthread_join(r.thread, NULL));
+	TEST_ASSERT_EQUAL_INT(1, (int)r.n);
+
+	close(a);
+	close(c);
+	close(l);
+}
+
+
 TEST_GROUP_RUNNER(inet_loopback_tcp)
 {
 	RUN_TEST_CASE(inet_loopback_tcp, single_thread_nonblocking);
 	RUN_TEST_CASE(inet_loopback_tcp, two_threads_blocking);
 	RUN_TEST_CASE(inet_loopback_tcp, two_threads_fionbio_poll);
 	RUN_TEST_CASE(inet_loopback_tcp, poll_timeout_with_blocked_accept);
+	RUN_TEST_CASE(inet_loopback_tcp, python_settimeout_connect);
+	RUN_TEST_CASE(inet_loopback_tcp, ops_on_listener_during_accept);
+	RUN_TEST_CASE(inet_loopback_tcp, send_while_peer_thread_recvs);
+	RUN_TEST_CASE(inet_loopback_tcp, poll_while_other_thread_recvs);
 }
 
 
