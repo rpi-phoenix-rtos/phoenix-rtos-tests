@@ -19,6 +19,16 @@ test:
           armv8m55-stm32n6-nucleo,
           ]
 
+    - name: objcache
+      type: unity
+      execute: test-objcache
+      # ~0.5 GB written to and read from the filesystem, then all free memory touched
+      timeout: 900
+      # The cached file must be much faster to map again than to read, which a RAM root is not
+      # (set OBJCACHE_DIR to a directory on a real filesystem there)
+      targets:
+        value: [aarch64a72-generic-rpi4b]
+
     - name: mprotect-fault
       harness: fault_harness.py
       execute: test-mprotect-fault
