@@ -23,6 +23,7 @@ void runner(void)
 	RUN_TEST_GROUP(tmpfile);
 	RUN_TEST_GROUP(tmpnames);
 	RUN_TEST_GROUP(pty);
+	RUN_TEST_GROUP(pty_timed);
 }
 
 
