@@ -30,6 +30,12 @@ DEP_LIBS := unity
 
 include $(binary.mk)
 
+NAME := test-objcache
+LOCAL_SRCS := test_objcache.c
+DEP_LIBS := unity
+
+include $(binary.mk)
+
 # Not in test.yaml: group msg_devmem faults kernels without the proc/msg.c
 # device-payload fix for ever (see the header of test_msg_devmem.c)
 NAME := test-msg-devmem
