@@ -26,6 +26,7 @@
 #include <pthread.h>
 #include <semaphore.h>
 #include <signal.h>
+#include <stdio.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
@@ -226,6 +227,65 @@ TEST(posix_semaphore, timedwait_times_out)
 }
 
 
+struct psem_timed {
+	int rc;
+	int err;
+	long ms;
+};
+
+
+static void *psem_timedWaiter(void *arg)
+{
+	struct psem_timed *t = arg;
+	long start = psem_nowMs();
+
+	t->rc = psem_waitFor(&psem, 300);
+	t->err = errno;
+	t->ms = psem_nowMs() - start;
+	return NULL;
+}
+
+
+/* Two timed waiters, one post: the waiter that does not get the unit must still
+ * time out at its deadline. Both see the token's pipe readable; the one that
+ * loses the read used to block in read() until the next post (here 1500 ms). */
+TEST(posix_semaphore, timedwait_loser_keeps_deadline)
+{
+	struct psem_timed t[2] = { 0 };
+	pthread_t th[2];
+	int i, won = 0, lost = -1;
+
+	TEST_ASSERT_EQUAL_INT(0, sem_init(&psem, 0, 0));
+	for (i = 0; i < 2; i++) {
+		TEST_ASSERT_EQUAL_INT(0, pthread_create(&th[i], NULL, psem_timedWaiter, &t[i]));
+	}
+	usleep(50000);
+	TEST_ASSERT_EQUAL_INT(0, sem_post(&psem));
+
+	/* A stuck loser is released by a second post, so the suite never hangs */
+	usleep(1500000);
+	(void)sem_post(&psem);
+
+	for (i = 0; i < 2; i++) {
+		TEST_ASSERT_EQUAL_INT(0, pthread_join(th[i], NULL));
+	}
+	for (i = 0; i < 2; i++) {
+		if (t[i].rc == 0) {
+			won++;
+		}
+		else {
+			lost = i;
+		}
+	}
+	printf("PSEM loser_keeps_deadline won=%d ms=%ld,%ld\n", won, t[0].ms, t[1].ms);
+
+	TEST_ASSERT_EQUAL_INT(1, won);
+	TEST_ASSERT_EQUAL_INT(ETIMEDOUT, t[lost].err);
+	TEST_ASSERT_LESS_THAN_INT(800, (int)t[lost].ms);
+	TEST_ASSERT_EQUAL_INT(0, sem_destroy(&psem));
+}
+
+
 TEST(posix_semaphore, timedwait_bad_time)
 {
 	struct timespec ts = { .tv_sec = 0, .tv_nsec = 1000000000L };
@@ -318,6 +378,7 @@ TEST_GROUP_RUNNER(posix_semaphore)
 	RUN_TEST_CASE(posix_semaphore, posts_release_waiters);
 	RUN_TEST_CASE(posix_semaphore, producer_consumers);
 	RUN_TEST_CASE(posix_semaphore, timedwait_times_out);
+	RUN_TEST_CASE(posix_semaphore, timedwait_loser_keeps_deadline);
 	RUN_TEST_CASE(posix_semaphore, timedwait_bad_time);
 	RUN_TEST_CASE(posix_semaphore, post_from_signal_handler);
 	RUN_TEST_CASE(posix_semaphore, overflow);
