@@ -51,6 +51,9 @@ $(eval $(call add_test_libc,poll))
 # poll() wake-up latency on AF_UNIX sockets (threads and a forked receiver)
 # -Wno-attribute-warning: sendmsg/recvmsg carry a "not fully supported" warning (single iovec in the kernel)
 $(eval $(call add_test_libc,unix-poll-wake, -lpthread, -Wno-attribute-warning))
+# anonymous pipes: POSIX semantics (forks and re-execs itself), plus throughput and latency
+# -Wno-attribute-warning: sendmsg/recvmsg carry a "not fully supported" warning (single iovec in the kernel)
+$(eval $(call add_test_libc,pipe, -lpthread, -Wno-attribute-warning))
 $(eval $(call add_test_libc,netdb))
 # TCP over 127.0.0.1 in one process: connect/accept/echo with one and two threads,
 # FIONBIO connect + poll(POLLOUT), poll() timeouts beside a blocked accept()
