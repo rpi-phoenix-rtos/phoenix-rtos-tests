@@ -29,6 +29,15 @@ test:
       targets:
         value: [aarch64a72-generic-rpi4b]
 
+    - name: frag
+      type: unity
+      execute: test-frag
+      # A process takes nearly all free memory twice; then 1 GiB of 4 MiB contiguous blocks.
+      # Needs MAP_CONTIGUOUS and a few GiB of RAM to tell the margin from the memory given back.
+      timeout: 600
+      targets:
+        value: [aarch64a72-generic-rpi4b]
+
     - name: mprotect-fault
       harness: fault_harness.py
       execute: test-mprotect-fault
