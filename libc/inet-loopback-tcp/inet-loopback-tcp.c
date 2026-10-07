@@ -43,6 +43,16 @@
  *      while another thread sends 64 kB and calls getsockname()/getsockopt()
  *      on the same socket; the reader must get each send's bytes contiguous
  *      and in order, nothing lost or interleaved
+ *    - udp_ntpclient_shape: ntpclient's exchange -- a connected UDP socket with
+ *      SO_RCVTIMEO/SO_SNDTIMEO, write() 48 bytes, read() 48 bytes -- with the
+ *      reply sent 100 ms later: read() must WAIT for it and return its bytes
+ *    - udp_rcvtimeo_expires: read() on a connected UDP socket nobody answers
+ *      fails with EAGAIN after about its 1 s SO_RCVTIMEO
+ *    - tcp_small_read_waits: a 32-byte read() that waits for its data
+ *
+ *    A read() or write() of up to 64 bytes reaches the server with its payload
+ *    packed inside the message; one answered by a thread other than the one
+ *    that received it must carry that payload along.
  *
  *    FAILS on any error, and -- instead of hanging -- when a case makes no
  *    progress for WATCHDOG_S seconds: a watchdog thread prints the case and the
@@ -68,6 +78,7 @@
 #include <netinet/tcp.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 
 #include "unity_fixture.h"
 
@@ -772,6 +783,185 @@ TEST(inet_loopback_tcp, big_send_with_concurrent_calls)
 }
 
 
+#define NTP_LEN 48
+
+struct udp_peer {
+	pthread_t thread;
+	int sock;
+	volatile int err;
+};
+
+
+/* Answers one datagram 100 ms late, with the request's bytes reversed */
+static void *udp_peer_thread(void *arg)
+{
+	struct udp_peer *u = arg;
+	struct sockaddr_in from;
+	socklen_t len = sizeof(from);
+	unsigned char req[NTP_LEN], rep[NTP_LEN];
+	ssize_t n;
+	int i;
+
+	n = recvfrom(u->sock, req, sizeof(req), 0, (struct sockaddr *)&from, &len);
+	if (n != NTP_LEN) {
+		u->err = (n < 0) ? errno : EPROTO;
+		return NULL;
+	}
+	for (i = 0; i < NTP_LEN; i++) {
+		rep[i] = req[NTP_LEN - 1 - i];
+	}
+	usleep(100 * 1000);
+	if (sendto(u->sock, rep, sizeof(rep), 0, (struct sockaddr *)&from, len) != NTP_LEN) {
+		u->err = errno;
+	}
+	return NULL;
+}
+
+
+static int udp_bound(struct sockaddr_in *addr)
+{
+	socklen_t len = sizeof(*addr);
+	int s;
+
+	s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+	TEST_ASSERT_TRUE(s >= 0);
+	memset(addr, 0, sizeof(*addr));
+	addr->sin_family = AF_INET;
+	addr->sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+	TEST_ASSERT_EQUAL_INT(0, bind(s, (struct sockaddr *)addr, sizeof(*addr)));
+	TEST_ASSERT_EQUAL_INT(0, getsockname(s, (struct sockaddr *)addr, &len));
+	return s;
+}
+
+
+/* ntpclient_connect(): socket, SO_RCVTIMEO, SO_SNDTIMEO, connect */
+static int udp_client(const struct sockaddr_in *to, time_t timeout_s)
+{
+	struct timeval tv = { .tv_sec = timeout_s, .tv_usec = 0 };
+	int c;
+
+	c = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+	TEST_ASSERT_TRUE(c >= 0);
+	TEST_ASSERT_EQUAL_INT(0, setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)));
+	TEST_ASSERT_EQUAL_INT(0, setsockopt(c, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)));
+	TEST_ASSERT_EQUAL_INT(0, connect(c, (const struct sockaddr *)to, sizeof(*to)));
+	return c;
+}
+
+
+TEST(inet_loopback_tcp, udp_ntpclient_shape)
+{
+	unsigned char req[NTP_LEN], got[NTP_LEN];
+	struct udp_peer u;
+	struct sockaddr_in addr;
+	int c, i;
+
+	watchdog_arm("udp_ntpclient_shape");
+	memset(&u, 0, sizeof(u));
+	u.sock = udp_bound(&addr);
+	TEST_ASSERT_EQUAL_INT(0, pthread_create(&u.thread, NULL, udp_peer_thread, &u));
+
+	step("connected UDP client");
+	c = udp_client(&addr, 5);
+	for (i = 0; i < NTP_LEN; i++) {
+		req[i] = (unsigned char)(0x30 + i);
+	}
+	step("write(48)");
+	TEST_ASSERT_EQUAL_INT(NTP_LEN, (int)write(c, req, sizeof(req)));
+	step("read(48) that waits ~100 ms");
+	memset(got, 0, sizeof(got));
+	TEST_ASSERT_EQUAL_INT(NTP_LEN, (int)read(c, got, sizeof(got)));
+	for (i = 0; i < NTP_LEN; i++) {
+		TEST_ASSERT_EQUAL_HEX8_MESSAGE(req[NTP_LEN - 1 - i], got[i], "read() returned other bytes than the reply");
+	}
+
+	TEST_ASSERT_EQUAL_INT(0, pthread_join(u.thread, NULL));
+	TEST_ASSERT_EQUAL_INT(0, u.err);
+	close(c);
+	close(u.sock);
+}
+
+
+TEST(inet_loopback_tcp, udp_rcvtimeo_expires)
+{
+	struct sockaddr_in addr;
+	unsigned char buf[NTP_LEN];
+	time_t t0, dt;
+	ssize_t n;
+	int s, c;
+
+	watchdog_arm("udp_rcvtimeo_expires");
+	s = udp_bound(&addr); /* bound, never answers */
+	c = udp_client(&addr, 1);
+
+	TEST_ASSERT_EQUAL_INT(NTP_LEN, (int)write(c, buf, sizeof(buf)));
+	step("read() with nothing coming, SO_RCVTIMEO 1 s");
+	t0 = now_ms();
+	n = read(c, buf, sizeof(buf));
+	dt = now_ms() - t0;
+	TEST_ASSERT_EQUAL_INT(-1, (int)n);
+	TEST_ASSERT_TRUE((errno == EAGAIN) || (errno == EWOULDBLOCK));
+	TEST_ASSERT_TRUE_MESSAGE(dt >= 800, "SO_RCVTIMEO ended the wait early");
+	TEST_ASSERT_TRUE_MESSAGE(dt < 3000, "SO_RCVTIMEO overran by > 2 s");
+
+	close(c);
+	close(s);
+}
+
+
+struct late_sender {
+	pthread_t thread;
+	int sock;
+	const unsigned char *buf;
+	size_t len;
+};
+
+
+static void *late_sender_thread(void *arg)
+{
+	struct late_sender *t = arg;
+
+	usleep(100 * 1000);
+	(void)send(t->sock, t->buf, t->len, 0);
+	return NULL;
+}
+
+
+TEST(inet_loopback_tcp, tcp_small_read_waits)
+{
+	unsigned char msg[32], got[32];
+	struct late_sender t;
+	size_t total;
+	ssize_t n;
+	int l, c, a, i;
+
+	watchdog_arm("tcp_small_read_waits");
+	connected_pair(&l, &c, &a);
+	for (i = 0; i < (int)sizeof(msg); i++) {
+		msg[i] = (unsigned char)(0xC0 + i);
+	}
+
+	memset(&t, 0, sizeof(t));
+	t.sock = a;
+	t.buf = msg;
+	t.len = sizeof(msg);
+	TEST_ASSERT_EQUAL_INT(0, pthread_create(&t.thread, NULL, late_sender_thread, &t));
+
+	step("read(32) that waits ~100 ms");
+	memset(got, 0, sizeof(got));
+	for (total = 0; total < sizeof(got); total += (size_t)n) {
+		n = read(c, got + total, sizeof(got) - total);
+		TEST_ASSERT_TRUE(n > 0);
+	}
+	TEST_ASSERT_EQUAL_MEMORY(msg, got, sizeof(msg));
+
+	TEST_ASSERT_EQUAL_INT(0, pthread_join(t.thread, NULL));
+	close(a);
+	close(c);
+	close(l);
+}
+
+
 TEST_GROUP_RUNNER(inet_loopback_tcp)
 {
 	RUN_TEST_CASE(inet_loopback_tcp, single_thread_nonblocking);
@@ -783,6 +973,9 @@ TEST_GROUP_RUNNER(inet_loopback_tcp)
 	RUN_TEST_CASE(inet_loopback_tcp, send_while_peer_thread_recvs);
 	RUN_TEST_CASE(inet_loopback_tcp, poll_while_other_thread_recvs);
 	RUN_TEST_CASE(inet_loopback_tcp, big_send_with_concurrent_calls);
+	RUN_TEST_CASE(inet_loopback_tcp, udp_ntpclient_shape);
+	RUN_TEST_CASE(inet_loopback_tcp, udp_rcvtimeo_expires);
+	RUN_TEST_CASE(inet_loopback_tcp, tcp_small_read_waits);
 }
 
 
