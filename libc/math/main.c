@@ -35,6 +35,7 @@ void runner(void)
 	RUN_TEST_GROUP(math_c99extra);
 	RUN_TEST_GROUP(math_gammaextra);
 	RUN_TEST_GROUP(math_fenv);
+	RUN_TEST_GROUP(math_accuracy);
 }
 
 
