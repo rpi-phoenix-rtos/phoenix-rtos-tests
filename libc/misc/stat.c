@@ -31,6 +31,7 @@
 #include <time.h>
 #include <stdio.h>
 #include <limits.h>
+#include <stdint.h>
 
 #include <stdlib.h>
 #include <sys/socket.h>
@@ -72,6 +73,7 @@ as the implementation for shmat() and related functions is missing.
 TEST_GROUP(stat_mode);
 TEST_GROUP(stat_nlink_size_blk_tim);
 TEST_GROUP(stat_errno);
+TEST_GROUP(stat_dir_times);
 
 TEST_SETUP(stat_mode)
 {
@@ -1078,6 +1080,103 @@ TEST(stat_errno, enotdir)
 }
 
 
+/*
+ * POSIX link(): the new entry's directory gets new st_mtime and st_ctime, the file a new
+ * st_ctime. unlink(): the directory gets new st_mtime and st_ctime, a file that keeps a
+ * link a new st_ctime. Neither changes the file's st_mtime (its data did not change).
+ * Timestamps have one-second resolution here, so each step waits past a second boundary.
+ */
+static void dirTimesWait(void)
+{
+	usleep(1100 * 1000);
+}
+
+
+static void dirTimesCheck(const char *base)
+{
+	char dir[PATH_MAX], file[PATH_MAX], other[PATH_MAX];
+	struct stat d0, d1, f0, f1;
+
+	TEST_ASSERT_LESS_THAN_INT(sizeof(dir), snprintf(dir, sizeof(dir), "%s/test_stat_dirtimes", base));
+	TEST_ASSERT_LESS_THAN_INT(sizeof(file), snprintf(file, sizeof(file), "%s/a", dir));
+	TEST_ASSERT_LESS_THAN_INT(sizeof(other), snprintf(other, sizeof(other), "%s/b", dir));
+	unlink(other);
+	unlink(file);
+	rmdir(dir);
+	TEST_ASSERT_EQUAL_INT(0, mkdir(dir, 0777));
+
+	/* a new entry */
+	TEST_ASSERT_EQUAL_INT(0, stat(dir, &d0));
+	dirTimesWait();
+	fd = open(file, O_CREAT | O_WRONLY, 0666);
+	TEST_ASSERT_GREATER_OR_EQUAL_INT(0, fd);
+	TEST_ASSERT_EQUAL_INT(0, close(fd));
+	TEST_ASSERT_EQUAL_INT(0, stat(dir, &d1));
+	TEST_ASSERT_GREATER_THAN(d0.st_mtime, d1.st_mtime);
+	TEST_ASSERT_GREATER_THAN(d0.st_ctime, d1.st_ctime);
+
+	/* a second link to the file */
+	TEST_ASSERT_EQUAL_INT(0, stat(dir, &d0));
+	TEST_ASSERT_EQUAL_INT(0, stat(file, &f0));
+	dirTimesWait();
+	TEST_ASSERT_EQUAL_INT(0, link(file, other));
+	TEST_ASSERT_EQUAL_INT(0, stat(dir, &d1));
+	TEST_ASSERT_EQUAL_INT(0, stat(file, &f1));
+	TEST_ASSERT_GREATER_THAN(d0.st_mtime, d1.st_mtime);
+	TEST_ASSERT_GREATER_THAN(d0.st_ctime, d1.st_ctime);
+	TEST_ASSERT_GREATER_THAN(f0.st_ctime, f1.st_ctime);
+	TEST_ASSERT_EQUAL_INT64((int64_t)f0.st_mtime, (int64_t)f1.st_mtime);
+
+	/* removing it again: the file keeps one link */
+	TEST_ASSERT_EQUAL_INT(0, stat(dir, &d0));
+	TEST_ASSERT_EQUAL_INT(0, stat(file, &f0));
+	dirTimesWait();
+	TEST_ASSERT_EQUAL_INT(0, unlink(other));
+	TEST_ASSERT_EQUAL_INT(0, stat(dir, &d1));
+	TEST_ASSERT_EQUAL_INT(0, stat(file, &f1));
+	TEST_ASSERT_GREATER_THAN(d0.st_mtime, d1.st_mtime);
+	TEST_ASSERT_GREATER_THAN(d0.st_ctime, d1.st_ctime);
+	TEST_ASSERT_GREATER_THAN(f0.st_ctime, f1.st_ctime);
+	TEST_ASSERT_EQUAL_INT64((int64_t)f0.st_mtime, (int64_t)f1.st_mtime);
+
+	/* a failed unlink changes nothing */
+	TEST_ASSERT_EQUAL_INT(0, stat(dir, &d0));
+	dirTimesWait();
+	TEST_ASSERT_EQUAL_INT(-1, unlink(other));
+	TEST_ASSERT_EQUAL_INT(ENOENT, errno);
+	TEST_ASSERT_EQUAL_INT(0, stat(dir, &d1));
+	TEST_ASSERT_EQUAL_INT64((int64_t)d0.st_mtime, (int64_t)d1.st_mtime);
+	TEST_ASSERT_EQUAL_INT64((int64_t)d0.st_ctime, (int64_t)d1.st_ctime);
+
+	TEST_ASSERT_EQUAL_INT(0, unlink(file));
+	TEST_ASSERT_EQUAL_INT(0, rmdir(dir));
+}
+
+
+TEST_SETUP(stat_dir_times)
+{
+}
+
+
+TEST_TEAR_DOWN(stat_dir_times)
+{
+}
+
+
+/* /tmp: dummyfs on Phoenix-RTOS */
+TEST(stat_dir_times, tmp)
+{
+	dirTimesCheck("/tmp");
+}
+
+
+/* the working directory's file system (the root: ext2, or NFS on a network boot) */
+TEST(stat_dir_times, cwd)
+{
+	dirTimesCheck(".");
+}
+
+
 TEST_GROUP_RUNNER(stat_mode)
 {
 	RUN_TEST_CASE(stat_mode, none);
@@ -1134,4 +1233,11 @@ TEST_GROUP_RUNNER(stat_errno)
 	RUN_TEST_CASE(stat_errno, enametoolong);
 	RUN_TEST_CASE(stat_errno, enoent);
 	RUN_TEST_CASE(stat_errno, enotdir);
+}
+
+
+TEST_GROUP_RUNNER(stat_dir_times)
+{
+	RUN_TEST_CASE(stat_dir_times, tmp);
+	RUN_TEST_CASE(stat_dir_times, cwd);
 }
