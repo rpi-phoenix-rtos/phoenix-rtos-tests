@@ -308,21 +308,18 @@ TEST(math_exp, log10_special_val)
 }
 
 
-/* Phoenix computes exp2(x) as exp(x * M_LN2) on top of a 13-term Maclaurin exp(), so the
- * results are NOT bit-exact powers of two - e.g. exp2(1.0) == 1.9999999999728812 and
- * exp2(10.0) == 1023.9999996131212. The expected values below are Phoenix libm's OWN output
- * (host-compiled from libphoenix/libm/phoenix/exp.c), NOT glibc's; the on-target libm runs
- * the same code so it matches to well within the small deltas used here. */
+/* exp2() of an integer is an exact power of two; the other expected values are
+ * the correctly rounded results (MPFR). */
 TEST(math_exp, exp2_basic)
 {
-	TEST_ASSERT_DOUBLE_WITHIN(1e-12, 1.4142135623730889, exp2(0.5));
-	TEST_ASSERT_DOUBLE_WITHIN(1e-12, 1.9999999999728812, exp2(1.0));
-	TEST_ASSERT_DOUBLE_WITHIN(1e-12, 3.9999999999999347, exp2(2.0));
-	TEST_ASSERT_DOUBLE_WITHIN(1e-12, 11.313708498984187, exp2(3.5));
-	TEST_ASSERT_DOUBLE_WITHIN(1e-12, 1023.9999996131212, exp2(10.0));
-	TEST_ASSERT_DOUBLE_WITHIN(1e-12, 0.49999999997562594, exp2(-1.0));
-	TEST_ASSERT_DOUBLE_WITHIN(1e-12, 0.17677669527918793, exp2(-2.5));
-	TEST_ASSERT_DOUBLE_WITHIN(1e-12, 1.1892071150027212, exp2(0.25));
+	TEST_ASSERT_EQUAL_DOUBLE(2.0, exp2(1.0));
+	TEST_ASSERT_EQUAL_DOUBLE(4.0, exp2(2.0));
+	TEST_ASSERT_EQUAL_DOUBLE(1024.0, exp2(10.0));
+	TEST_ASSERT_EQUAL_DOUBLE(0.5, exp2(-1.0));
+	TEST_ASSERT_DOUBLE_WITHIN(1e-15, 1.4142135623730951, exp2(0.5));
+	TEST_ASSERT_DOUBLE_WITHIN(1e-14, 11.313708498984761, exp2(3.5));
+	TEST_ASSERT_DOUBLE_WITHIN(1e-15, 0.17677669529663689, exp2(-2.5));
+	TEST_ASSERT_DOUBLE_WITHIN(1e-15, 1.189207115002721, exp2(0.25));
 }
 
 
@@ -330,7 +327,7 @@ TEST(math_exp, exp2_special_val)
 {
 	TEST_ASSERT_DOUBLE_IS_NAN(exp2(NAN));
 
-	/* exp2(+-0) == 1 exactly: exp(0.0) short-circuits the Maclaurin loop to 1.0. */
+	/* exp2(+-0) == 1 exactly */
 	TEST_ASSERT_EQUAL_DOUBLE(1.0, exp2(0.0));
 	TEST_ASSERT_EQUAL_DOUBLE(1.0, exp2(-0.0));
 
