@@ -12,6 +12,7 @@ $(eval $(call add_test, test_msg))
 $(eval $(call add_test, test_pthreads))
 $(eval $(call add_test, test_priority))
 $(eval $(call add_unity_test, test_thread_rand))
+$(eval $(call add_unity_test, test_cputime))
 
 NAME := test-msg-abandon
 LOCAL_SRCS := test_msg_abandon.c

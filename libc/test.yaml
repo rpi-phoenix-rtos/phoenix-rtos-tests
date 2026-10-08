@@ -249,3 +249,9 @@ test:
         # the code it writes and runs is aarch64 (elsewhere the test is ignored); on an
         # emulator the flush checks cannot fail, so the last case is ignored there
         include: [aarch64a53-zynqmp-qemu]
+
+    - name: semaphore
+      execute: test-libc-semaphore
+      targets:
+        # no posixsrv
+        exclude: [armv7r5f-zynqmp-qemu, armv8m33-mcxn94x-frdm, armv8m33-mcxn94x-frdm_cpu1 ]
