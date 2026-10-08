@@ -18,6 +18,7 @@
 #include <string.h>
 #include <sys/resource.h>
 #include <sys/times.h>
+#include <time.h>
 
 #include <unity_fixture.h>
 
@@ -80,20 +81,30 @@ TEST(misc_rusage_times, getrusage_null_efault)
 
 TEST(misc_rusage_times, times_returns_defined)
 {
-	struct tms tb;
+	struct tms tb, tb2;
+	struct timespec start, now;
 	clock_t t1, t2;
 
-	/* Poison; times() must zero the CPU breakdown (was left undefined). */
+	/* Poison; times() must fill the CPU breakdown (was left undefined). */
 	memset(&tb, 0xaa, sizeof(tb));
 	t1 = times(&tb);
 	TEST_ASSERT_NOT_EQUAL_INT((clock_t)-1, t1);
 	/* Pins the headline of the fix: real elapsed ticks, not the old `return 0`
 	 * stub. By the time this runs, monotonic uptime is tens of seconds (>>0). */
 	TEST_ASSERT_GREATER_THAN_INT(0, (int)t1);
-	TEST_ASSERT_EQUAL_INT(0, (int)tb.tms_utime);
-	TEST_ASSERT_EQUAL_INT(0, (int)tb.tms_stime);
-	TEST_ASSERT_EQUAL_INT(0, (int)tb.tms_cutime);
-	TEST_ASSERT_EQUAL_INT(0, (int)tb.tms_cstime);
+	TEST_ASSERT_TRUE(tb.tms_utime >= 0);
+	TEST_ASSERT_TRUE(tb.tms_stime >= 0);
+	TEST_ASSERT_TRUE(tb.tms_cutime >= 0);
+	TEST_ASSERT_TRUE(tb.tms_cstime >= 0);
+
+	/* The CPU breakdown is this process's real CPU time (sys_cpuTime), not a
+	 * constant: 300 ms of spinning must show up in user + system time. */
+	clock_gettime(CLOCK_MONOTONIC, &start);
+	do {
+		clock_gettime(CLOCK_MONOTONIC, &now);
+	} while ((now.tv_sec - start.tv_sec) * 1000L + (now.tv_nsec - start.tv_nsec) / 1000000L < 300);
+	TEST_ASSERT_NOT_EQUAL_INT((clock_t)-1, times(&tb2));
+	TEST_ASSERT_TRUE(tb2.tms_utime + tb2.tms_stime > tb.tms_utime + tb.tms_stime);
 
 	/* Elapsed real time is monotonic non-decreasing (was a stub returning 0,
 	 * so every elapsed measurement read 0). */
