@@ -52,6 +52,31 @@ static void *unnamed_clockwaiter(void *arg)
 }
 
 
+/* A wait on the far-future deadline C++'s time_point::max() gives */
+typedef struct {
+	clockid_t clock; /* -1: sem_timedwait() */
+	int ret;
+	int done;
+} unnamed_farwaiter_t;
+
+
+static void *unnamed_farwaiter(void *arg)
+{
+	unnamed_farwaiter_t *w = (unnamed_farwaiter_t *)arg;
+	struct timespec ts = { .tv_sec = (time_t)LLONG_MAX, .tv_nsec = 0 }; /* time_t is 64-bit on Phoenix */
+
+	if (w->clock == (clockid_t)-1) {
+		w->ret = sem_timedwait(&sem, &ts);
+	}
+	else {
+		w->ret = sem_clockwait(&sem, w->clock, &ts);
+	}
+	__atomic_store_n(&w->done, 1, __ATOMIC_RELEASE);
+
+	return NULL;
+}
+
+
 TEST_GROUP(sem_unnamed);
 
 
@@ -506,6 +531,32 @@ TEST(sem_unnamed, clockwait_wakes_on_post)
 }
 
 
+/* An overflow into the past would time out at once */
+TEST(sem_unnamed, far_future_deadline_blocks)
+{
+	const clockid_t clocks[] = { (clockid_t)-1, CLOCK_REALTIME, CLOCK_MONOTONIC };
+	unnamed_farwaiter_t w;
+	pthread_t tid;
+	size_t i;
+
+	unnamed_init(0);
+
+	for (i = 0; i < sizeof(clocks) / sizeof(clocks[0]); i++) {
+		w.clock = clocks[i];
+		w.ret = -1;
+		w.done = 0;
+
+		TEST_ASSERT_EQUAL_INT(0, pthread_create(&tid, NULL, unnamed_farwaiter, &w));
+		usleep(200 * 1000);
+		TEST_ASSERT_EQUAL_INT_MESSAGE(0, __atomic_load_n(&w.done, __ATOMIC_ACQUIRE), "a far-future deadline timed out");
+
+		TEST_ASSERT_EQUAL_INT(0, sem_post(&sem));
+		TEST_ASSERT_EQUAL_INT(0, pthread_join(tid, NULL));
+		TEST_ASSERT_EQUAL_INT(0, w.ret);
+	}
+}
+
+
 TEST_GROUP_RUNNER(sem_unnamed)
 {
 	RUN_TEST_CASE(sem_unnamed, init_destroy);
@@ -538,4 +589,5 @@ TEST_GROUP_RUNNER(sem_unnamed)
 	RUN_TEST_CASE(sem_unnamed, clockwait_invalid_clock);
 	RUN_TEST_CASE(sem_unnamed, clockwait_invalid_nsec);
 	RUN_TEST_CASE(sem_unnamed, clockwait_wakes_on_post);
+	RUN_TEST_CASE(sem_unnamed, far_future_deadline_blocks);
 }
