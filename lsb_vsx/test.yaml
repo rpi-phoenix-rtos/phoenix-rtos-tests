@@ -314,7 +314,6 @@ test:
             testcase_count: 21
 
           # 2, 33: geteuid() is a stab
-          # 4, 5, 7, 8, 10, 11, 13, 14: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1408
           # 19, 20, 21: no permission verification in the system
           # 23: no device to be mounted (VSX_ROFS)
           # 25: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1462
@@ -322,19 +321,18 @@ test:
           # 27: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1401 (same problem with EINTR)
           # 28: detection of EMFILE is not supported, while FOPEN_MAX is defined but unused
         - name: T.fopen
-          execute: run-test /tset/ANSI.os/streamio/fopen/T.fopen{1,3,6,9,12,15-18,22,24,29-32,34-44}
+          execute: run-test /tset/ANSI.os/streamio/fopen/T.fopen{1,3-18,22,24,29-32,34-44}
           kwargs:
             testcase_count: 44
 
           # 2, 37: geteuid() is a stab
-          # 5, 6, 8, 9, 13, 14, 16, 17: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1408
           # 21, 22, 23: no permission verification in the system
           # 25: no device to be mounted (VSX_ROFS)
           # 26: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1462
           # 27: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1412
           # 28: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1401 (same problem with EINTR)
         - name: T.freopen
-          execute: run-test /tset/ANSI.os/streamio/freopen/T.freopen{1,3-4,7,10-12,15,18-20,24,29-36,38-49}
+          execute: run-test /tset/ANSI.os/streamio/freopen/T.freopen{1,3-20,24,29-36,38-49}
           kwargs:
             testcase_count: 49
 
@@ -478,9 +476,8 @@ test:
           kwargs:
             testcase_count: 58
 
-          # 2: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1418
         - name: T.setbuf
-          execute: run-test /tset/ANSI.os/streamio/setbuf/T.setbuf{1,3-5}
+          execute: run-test /tset/ANSI.os/streamio/setbuf/T.setbuf
           kwargs:
             testcase_count: 5
 
@@ -827,19 +824,18 @@ test:
             testcase_count: 39
           ignore: True
 
-          # 3: umask() is a stub
-          # 4, 5, 8: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1403
-          # 7: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1408
+          # 4, 5: system doesn't support users group
+          # 8: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1458
           # 9, 10: no permission verification in the system
           # 13: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1258
           # 14: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1462
           # 18: no device to be mounted (VSX_ROFS)
         - name: T.mkdir
-          execute: run-test /tset/POSIX.os/files/mkdir/T.mkdir{1-2,6,11-12,15-17,19-27}
+          execute: run-test /tset/POSIX.os/files/mkdir/T.mkdir{1-3,6-7,11-12,15-17,19-27}
           kwargs:
             testcase_count: 27
 
-          # 4: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1403
+          # 4: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1458
           # 5: no permission verification in the system
         - name: T.chdir
           execute: run-test /tset/POSIX.os/files/chdir/T.chdir{1-3,8-15}
@@ -877,7 +873,7 @@ test:
           # 8: MAX_INPUT is not defined
           # 14: PIPE_BUF is not defined
           # 16: _POSIX_CHOWN_RESTRICTED is not defined
-          # 19: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1403
+          # 19: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1458
           # 20: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1412
         - name: T.pathconf
           execute: run-test /tset/POSIX.os/files/pathconf/T.pathconf{1-3,5,7,9,11-13,15,17-18,21-43}
@@ -920,13 +916,12 @@ test:
           kwargs:
             testcase_count: 31
 
-          # 3: umask() is a stub
-          # 4, 5, 7: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1403
-          # 6: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1408
+          # 4, 5: system doesn't support users group
+          # 7: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1458
           # 8, 9: no permission verification in the system
           # 16: no device to be mounted (VSX_ROFS)
         - name: T.mkfifo
-          execute: run-test /tset/POSIX.os/files/mkfifo/T.mkfifo{1-2,10,13-15,17}
+          execute: run-test /tset/POSIX.os/files/mkfifo/T.mkfifo{1-3,6,10,13-15,17}
           kwargs:
             testcase_count: 17
 
@@ -937,7 +932,7 @@ test:
             testcase_count: 56
           ignore: True
 
-          # 5: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1403
+          # 5: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1458
           # 7, 8: no permission verification in the system
           # 13: opendir() doesn't detect EMFILE and ENFILE
         - name: T.opendir
@@ -954,14 +949,15 @@ test:
           # 1, 3, 10, 12, 35: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1273
           # 5, 6, 7, 8, 11, 13, 22, 25, 32: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/409
           # 14: link() can't be used across file systems
-          # 15, 16: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1403
+          # 15, 16: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1458
           # 18, 19, 20: no permission verification in the system
           # 21: rename() doesn't detect EBUSY
           # 26: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1258
           # 27: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1462
           # 33: no device to be mounted (VSX_ROFS)
+          # 34: TODO: VSX_MOUNT_DEV option not set
         - name: T.rename
-          execute: run-test /tset/POSIX.os/files/rename/T.rename{2,4,9,17,23-24,28-31,34,36-39}
+          execute: run-test /tset/POSIX.os/files/rename/T.rename{2,4,9,17,23-24,28-31,36-39}
           kwargs:
             testcase_count: 39
 
@@ -970,8 +966,8 @@ test:
           kwargs:
             testcase_count: 2
 
-          # 7: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1403
-          # 8: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1403
+          # 7: TODO: VSX_MOUNT_DEV option not set
+          # 8: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1458
           # 10, 11: no permission verification in the system
           # 12: rmdir() doesn't detect EBUSY
           # 14: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1258
@@ -982,17 +978,16 @@ test:
           kwargs:
             testcase_count: 24
 
-          # 3: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1444
           # 6: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1443
-          # 7: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1403
-          # 8: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1403
+          # 7: TODO: VSX_MOUNT_DEV option not set
+          # 8: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1458
           # 9, 10: no permission verification in the system
           # 11: remove() doesn't detect EBUSY
           # 13: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1258
           # 14: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1462
           # 19: no device to be mounted (VSX_ROFS)
         - name: T.remove
-          execute: run-test /tset/ANSI.os/streamio/remove/T.remove{1-2,4-5,12,15-18,20-25}
+          execute: run-test /tset/ANSI.os/streamio/remove/T.remove{1-5,12,15-18,20-25}
           kwargs:
             testcase_count: 25
 
@@ -1004,12 +999,10 @@ test:
           kwargs:
             testcase_count: 17
 
-          # umask() is a stub
         - name: T.umask
-          execute: run-test /tset/POSIX.os/files/umask/T.umask
+          execute: run-test /tset/POSIX.os/files/umask/T.umask{1-3}
           kwargs:
             testcase_count: 3
-          ignore: True
 
           # 6: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1443
           # 7, 20: no device to be mounted (VSX_ROFS, VSX_MOUNT_DEV)
@@ -1240,12 +1233,11 @@ test:
           kwargs:
             testcase_count: 5
 
-          # 15, 16, 29, 30, 34: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1458
+          # 15, 16, 29, 30, 32, 34: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1458
           # 21: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1235
           # 23: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1464
           # 25, 26, 42: system does not support users or groups; only root exists
           # 27, 28: system doesn't support special mode bits like S_ISUID and S_ISGID (VSX_SET_ID_MODES_SUPP)
-          # 32: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1403
           # 35, 36: no permission verification in the system
           # 37: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1462
           # 38: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1258
@@ -1255,12 +1247,11 @@ test:
           kwargs:
             testcase_count: 50
 
-          # 15, 16, 29, 30, 34: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1458
+          # 15, 16, 29, 30, 32, 34: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1458
           # 21: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1235
           # 23: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1464
           # 25, 26, 42: system does not support users or groups; only root exists
           # 27, 28: system doesn't support special mode bits like S_ISUID and S_ISGID (VSX_SET_ID_MODES_SUPP)
-          # 32: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1403
           # 35, 36: no permission verification in the system
           # 37: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1462
           # 38: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1258
@@ -1270,12 +1261,11 @@ test:
           kwargs:
             testcase_count: 50
 
-          # 15, 16, 29, 30, 34: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1458
+          # 15, 16, 29, 30, 32, 34: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1458
           # 21: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1235
           # 23: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1464
           # 25, 26: system does not support users or groups; only root exists
           # 27, 28: system doesn't support special mode bits like S_ISUID and S_ISGID (VSX_SET_ID_MODES_SUPP)
-          # 32: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1403
           # 35, 36: no permission verification in the system
           # 37: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1462
           # 38: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1258
@@ -1285,12 +1275,11 @@ test:
           kwargs:
             testcase_count: 50
 
-          # 15, 16, 29, 30, 34: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1458
+          # 15, 16, 29, 30, 32, 34: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1458
           # 21: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1235
           # 23: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1464
           # 25, 26, 42: system does not support users or groups; only root exists
           # 27, 28: system doesn't support special mode bits like S_ISUID and S_ISGID (VSX_SET_ID_MODES_SUPP)
-          # 32: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1403
           # 35, 36: no permission verification in the system
           # 37: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1462
           # 38: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1258
@@ -1300,12 +1289,11 @@ test:
           kwargs:
             testcase_count: 50
 
-          # 15, 16, 29, 30, 34: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1458
+          # 15, 16, 29, 30, 32, 34: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1458
           # 21: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1235
           # 23: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1464
           # 25, 26, 42: system does not support users or groups; only root exists
           # 27, 28: system doesn't support special mode bits like S_ISUID and S_ISGID (VSX_SET_ID_MODES_SUPP)
-          # 32: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1403
           # 35, 36: no permission verification in the system
           # 37: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1462
           # 38: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1258
@@ -1315,12 +1303,11 @@ test:
           kwargs:
             testcase_count: 50
 
-          # 15, 16, 29, 30, 34: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1458
+          # 15, 16, 29, 30, 32, 34: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1458
           # 21: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1235
           # 23: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1464
           # 25, 26: system does not support users or groups; only root exists
           # 27, 28: system doesn't support special mode bits like S_ISUID and S_ISGID (VSX_SET_ID_MODES_SUPP)
-          # 32: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1403
           # 35, 36: no permission verification in the system
           # 37: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1462
           # 38: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1258
@@ -1333,24 +1320,23 @@ test:
           # 5: times() is a stub
           # 7: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1455
           # 8: TODO: investigate why blocked signal arrives
-          # 11: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1403
+          # 11: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1776
           # 12: system doesn't support saved set-user-ID and set-group-ID
           # 13, 21: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1458
-          # 16: umask() is a stub
           # 17: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1456
         - name: T.fork
-          execute: run-test /tset/POSIX.os/procprim/fork/T.fork{1-4,6,9-10,14-15,18-20}
+          execute: run-test /tset/POSIX.os/procprim/fork/T.fork{1-4,6,9-10,14-16,18-20}
           kwargs:
             testcase_count: 21
 
           # 1: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1233
           # 2: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1432
-          # 4, 5, 6, 7, 8, 15: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1403
           # 9: kill() doesn't support 0 and -1 pid values
           # 12, 16, 17: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1341
           # 14: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1453
+          # 15: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1775
         - name: T.kill
-          execute: run-test /tset/POSIX.os/procprim/kill/T.kill{3,10-11,13,18}
+          execute: run-test /tset/POSIX.os/procprim/kill/T.kill{3-8,10-11,13,18}
           kwargs:
             testcase_count: 18
 
@@ -1400,12 +1386,10 @@ test:
             testcase_count: 42
           ignore: True
 
-          # https://github.com/phoenix-rtos/phoenix-rtos-project/issues/648
         - name: T.sigpending
           execute: run-test /tset/POSIX.os/procprim/sigpending/T.sigpending
           kwargs:
             testcase_count: 1
-          ignore: True
 
           # 7: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1233
           # 8: https://github.com/phoenix-rtos/phoenix-rtos-project/issues/1341

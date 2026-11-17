@@ -120,6 +120,9 @@ static unsigned long unix_data_checksum(void)
 static int pollTimeoutDelay = 30;
 static int transferLoopCnt = TRANSFER_LOOP_CNT;
 
+static int sv[2], sendfds[MAX_FD_CNT], recvfds[MAX_FD_CNT];
+static char cbuf[CMSG_SPACE(sizeof(int)) * MAX_FD_CNT];
+
 
 static ssize_t unix_named_socket(int type, const char *name)
 {
@@ -160,7 +163,7 @@ static int unlink_files(size_t cnt)
 	char buf[64];
 
 	for (i = 0; i < cnt; ++i) {
-		snprintf(buf, sizeof(buf), "/tmp/test_file_%zu", i);
+		snprintf(buf, sizeof(buf), TEST_FILE_PATH_TEMPLATE, i);
 		if (unlink(buf) < 0)
 			return -1;
 	}
@@ -356,6 +359,14 @@ TEST_SETUP(test_unix_socket)
 	}
 
 	data_sum = unix_data_checksum();
+
+	sv[0] = -1;
+	sv[1] = -1;
+
+	for (int i = 0; i < MAX_FD_CNT; i++) {
+		sendfds[i] = -1;
+		recvfds[i] = -1;
+	}
 }
 
 
@@ -368,8 +379,13 @@ TEST_TEAR_DOWN(test_unix_socket)
 	 * log, from a binary that never ran. That ambiguity has cost real time on
 	 * the rpi4b port, where these tests are used to chase an intermittent
 	 * fault. Unity's own per-test line is what makes progress visible; this
-	 * only guarantees it reaches the console. */
+	 * only guarantees it reaches the console. Done first, as a failing
+	 * assertion below ends the teardown. */
 	fflush(stdout);
+
+	TEST_ASSERT_EQUAL(0, close_files(sv, sizeof(sv) / sizeof(sv[0])));
+	TEST_ASSERT_EQUAL(0, close_files(sendfds, sizeof(sendfds) / sizeof(sendfds[0])));
+	TEST_ASSERT_EQUAL(0, close_files(recvfds, sizeof(recvfds) / sizeof(recvfds[0])));
 }
 
 
@@ -1307,6 +1323,7 @@ static void unix_poll(int type)
 	struct pollfd fds[2];
 	struct timespec ts[2];
 	int rv, ms;
+	const int datalen = sizeof(data) / 2; /* send less data not to overflow the kernel buffer */
 
 	fds[0].fd = 11111;
 	fds[1].fd = 22222;
@@ -1315,9 +1332,9 @@ static void unix_poll(int type)
 	fds[0].revents = 0;
 	fds[1].revents = 0;
 	rv = poll(fds, 2, 0);
-	TEST_ASSERT(rv == 2);
-	TEST_ASSERT(fds[0].revents == POLLNVAL);
-	TEST_ASSERT(fds[1].revents == POLLNVAL);
+	TEST_ASSERT_EQUAL(2, rv);
+	TEST_ASSERT_EQUAL(POLLNVAL, fds[0].revents);
+	TEST_ASSERT_EQUAL(POLLNVAL, fds[1].revents);
 
 	if (socketpair(AF_UNIX, type, 0, fd) < 0)
 		FAIL("socketpair");
@@ -1333,9 +1350,9 @@ static void unix_poll(int type)
 	rv = poll(fds, 2, 300);
 	clock_gettime(CLOCK_REALTIME, &ts[1]);
 	ms = MS_BETWEEN(ts[0], ts[1]);
-	TEST_ASSERT(rv == 0);
-	TEST_ASSERT(fds[0].revents == 0);
-	TEST_ASSERT(fds[1].revents == 0);
+	TEST_ASSERT_EQUAL(0, rv);
+	TEST_ASSERT_EQUAL(0, fds[0].revents);
+	TEST_ASSERT_EQUAL(0, fds[1].revents);
 	TEST_ASSERT_LESS_THAN(300 + pollTimeoutDelay, ms);
 	TEST_ASSERT_GREATER_THAN(290, ms);
 
@@ -1347,13 +1364,13 @@ static void unix_poll(int type)
 	rv = poll(fds, 2, 1000);
 	clock_gettime(CLOCK_REALTIME, &ts[1]);
 	ms = MS_BETWEEN(ts[0], ts[1]);
-	TEST_ASSERT(rv == 2);
-	TEST_ASSERT(fds[0].revents == POLLOUT);
-	TEST_ASSERT(fds[1].revents == POLLOUT);
+	TEST_ASSERT_EQUAL(2, rv);
+	TEST_ASSERT_EQUAL(POLLOUT, fds[0].revents);
+	TEST_ASSERT_EQUAL(POLLOUT, fds[1].revents);
 	TEST_ASSERT_LESS_THAN(5, ms);
 
-	send(fd[0], data, sizeof(data), 0);
-	send(fd[1], data, sizeof(data), 0);
+	TEST_ASSERT_EQUAL(datalen, send(fd[0], data, datalen, 0));
+	TEST_ASSERT_EQUAL(datalen, send(fd[1], data, datalen, 0));
 
 	clock_gettime(CLOCK_REALTIME, &ts[0]);
 	fds[0].events = POLLIN;
@@ -1363,9 +1380,9 @@ static void unix_poll(int type)
 	rv = poll(fds, 2, 1000);
 	clock_gettime(CLOCK_REALTIME, &ts[1]);
 	ms = MS_BETWEEN(ts[0], ts[1]);
-	TEST_ASSERT(rv == 2);
-	TEST_ASSERT(fds[0].revents == POLLIN);
-	TEST_ASSERT(fds[1].revents == POLLIN);
+	TEST_ASSERT_EQUAL(2, rv);
+	TEST_ASSERT_EQUAL(POLLIN, fds[0].revents);
+	TEST_ASSERT_EQUAL(POLLIN, fds[1].revents);
 	TEST_ASSERT_LESS_THAN(5, ms);
 
 	close(fd[0]);
@@ -1929,6 +1946,273 @@ TEST(test_unix_socket, recv_msg_peek)
 {
 	unix_socket_recv_msg_peek(0);
 	unix_socket_recv_msg_peek(MSG_DONTWAIT);
+}
+
+
+TEST(test_unix_socket, trunc_basic)
+{
+	struct iovec iov;
+	struct msghdr msg = { 0 };
+	size_t nfds = MAX_FD_CNT;
+	char payload[64];
+	char recvbuf[8] = { 0 };
+
+	memset(payload, 'A', sizeof(payload));
+
+	TEST_ASSERT_EQUAL(0, socketpair(AF_UNIX, SOCK_DGRAM, 0, sv));
+
+	setup_msg(&msg, &iov, payload, sizeof(payload), NULL, 0);
+	TEST_ASSERT_EQUAL(sizeof(payload), sendmsg(sv[0], &msg, 0));
+
+	setup_msg(&msg, &iov, recvbuf, sizeof(recvbuf), NULL, 0);
+	TEST_ASSERT_EQUAL(sizeof(recvbuf), recvmsg(sv[1], &msg, 0));
+	TEST_ASSERT_EQUAL(0, unpack_fds(&msg, recvfds, &nfds));
+
+	TEST_ASSERT_EQUAL_MEMORY(payload, recvbuf, sizeof(recvbuf));
+	TEST_ASSERT_EQUAL_size_t(0, nfds);
+
+	TEST_ASSERT_BITS_HIGH(MSG_TRUNC, msg.msg_flags);
+	TEST_ASSERT_BITS_LOW(MSG_CTRUNC, msg.msg_flags);
+}
+
+
+TEST(test_unix_socket, trunc_peek)
+{
+	struct iovec iov;
+	struct msghdr msg = { 0 };
+	size_t nfds = MAX_FD_CNT;
+	char payload[64];
+	char recvbuf[8] = { 0 };
+	char restbuf[sizeof(payload)] = { 0 };
+
+	memset(payload, 'A', sizeof(payload));
+
+	TEST_ASSERT_EQUAL(0, socketpair(AF_UNIX, SOCK_DGRAM, 0, sv));
+
+	setup_msg(&msg, &iov, payload, sizeof(payload), NULL, 0);
+	TEST_ASSERT_EQUAL(sizeof(payload), sendmsg(sv[0], &msg, 0));
+
+	/* peek 8 bytes */
+	setup_msg(&msg, &iov, recvbuf, sizeof(recvbuf), NULL, 0);
+	TEST_ASSERT_EQUAL(sizeof(recvbuf), recvmsg(sv[1], &msg, MSG_PEEK));
+	TEST_ASSERT_EQUAL(0, unpack_fds(&msg, recvfds, &nfds));
+
+	TEST_ASSERT_EQUAL_MEMORY(payload, recvbuf, sizeof(recvbuf));
+	TEST_ASSERT_EQUAL_size_t(0, nfds);
+
+	TEST_ASSERT_BITS_HIGH(MSG_TRUNC, msg.msg_flags);
+	TEST_ASSERT_BITS_LOW(MSG_CTRUNC, msg.msg_flags);
+
+	/* read the data */
+	nfds = MAX_FD_CNT;
+	setup_msg(&msg, &iov, restbuf, sizeof(restbuf), NULL, 0);
+	TEST_ASSERT_EQUAL(sizeof(restbuf), recvmsg(sv[1], &msg, 0));
+	TEST_ASSERT_EQUAL(0, unpack_fds(&msg, recvfds, &nfds));
+
+	TEST_ASSERT_EQUAL_MEMORY(payload, restbuf, sizeof(restbuf));
+	TEST_ASSERT_EQUAL_size_t(0, nfds);
+	TEST_ASSERT_BITS_LOW(MSG_TRUNC | MSG_CTRUNC, msg.msg_flags);
+
+	/* next read should return with EWOULDBLOCK */
+	setup_msg(&msg, &iov, restbuf, sizeof(restbuf), NULL, 0);
+	errno = 0;
+	TEST_ASSERT_EQUAL(-1, recvmsg(sv[1], &msg, MSG_DONTWAIT));
+	TEST_ASSERT_EQUAL(EWOULDBLOCK, errno);
+}
+
+
+TEST(test_unix_socket, ctrunc_basic)
+{
+	struct iovec iov;
+	struct msghdr msg;
+	size_t nfds = MAX_FD_CNT;
+	char payload[] = "HELLO";
+	char recvbuf[8] = { 0 };
+
+	TEST_ASSERT_EQUAL(0, socketpair(AF_UNIX, SOCK_DGRAM, 0, sv));
+
+	TEST_ASSERT_EQUAL(0, open_files(sendfds, 2));
+
+	setup_msg(&msg, &iov, payload, sizeof(payload), cbuf, sizeof(cbuf));
+	pack_fds(&msg, sendfds, 2);
+	TEST_ASSERT_EQUAL(sizeof(payload), sendmsg(sv[0], &msg, 0));
+
+	setup_msg(&msg, &iov, recvbuf, sizeof(recvbuf), cbuf, 1);
+	TEST_ASSERT_EQUAL(sizeof(payload), recvmsg(sv[1], &msg, 0));
+	TEST_ASSERT_EQUAL(0, unpack_fds(&msg, recvfds, &nfds));
+
+	TEST_ASSERT_EQUAL_MEMORY(payload, recvbuf, sizeof(payload));
+	TEST_ASSERT_EQUAL_size_t(0, nfds);
+
+	TEST_ASSERT_BITS_LOW(MSG_TRUNC, msg.msg_flags);
+	TEST_ASSERT_BITS_HIGH(MSG_CTRUNC, msg.msg_flags);
+
+	TEST_ASSERT_EQUAL(0, unlink_files(2));
+}
+
+
+TEST(test_unix_socket, trunc_and_ctrunc)
+{
+	struct iovec iov;
+	struct msghdr msg;
+	size_t nfds = MAX_FD_CNT;
+	char payload[64];
+	char recvbuf[8];
+	memset(payload, 'B', sizeof(payload));
+
+	TEST_ASSERT_EQUAL(0, socketpair(AF_UNIX, SOCK_DGRAM, 0, sv));
+
+	TEST_ASSERT_EQUAL(0, open_files(sendfds, 2));
+
+	setup_msg(&msg, &iov, payload, sizeof(payload), cbuf, sizeof(cbuf));
+	pack_fds(&msg, sendfds, 2);
+	TEST_ASSERT_EQUAL(sizeof(payload), sendmsg(sv[0], &msg, 0));
+
+	setup_msg(&msg, &iov, recvbuf, sizeof(recvbuf), cbuf, 1);
+	TEST_ASSERT_EQUAL(sizeof(recvbuf), recvmsg(sv[1], &msg, 0));
+	TEST_ASSERT_EQUAL(0, unpack_fds(&msg, recvfds, &nfds));
+
+	TEST_ASSERT_EQUAL_MEMORY(payload, recvbuf, sizeof(recvbuf));
+	TEST_ASSERT_EQUAL_size_t(0, nfds);
+
+	TEST_ASSERT_BITS_HIGH(MSG_TRUNC | MSG_CTRUNC, msg.msg_flags);
+
+	TEST_ASSERT_EQUAL(0, unlink_files(2));
+}
+
+
+TEST(test_unix_socket, trunc_and_ctrunc_peek)
+{
+	struct iovec iov;
+	struct msghdr msg;
+	size_t nfds = MAX_FD_CNT;
+	char payload[64];
+	char recvbuf[8];
+	char restbuf[sizeof(payload)];
+	memset(payload, 'B', sizeof(payload));
+
+	TEST_ASSERT_EQUAL(0, socketpair(AF_UNIX, SOCK_DGRAM, 0, sv));
+
+	TEST_ASSERT_EQUAL(0, open_files(sendfds, MAX_FD_CNT));
+
+	setup_msg(&msg, &iov, payload, sizeof(payload), cbuf, sizeof(cbuf));
+	pack_fds(&msg, sendfds, MAX_FD_CNT);
+	TEST_ASSERT_EQUAL(sizeof(payload), sendmsg(sv[0], &msg, 0));
+
+	/* peek the data (too little control buffer) */
+	setup_msg(&msg, &iov, recvbuf, sizeof(recvbuf), cbuf, 1);
+	TEST_ASSERT_EQUAL(sizeof(recvbuf), recvmsg(sv[1], &msg, MSG_PEEK));
+	TEST_ASSERT_EQUAL(0, unpack_fds(&msg, recvfds, &nfds));
+
+	TEST_ASSERT_EQUAL_MEMORY(payload, recvbuf, sizeof(recvbuf));
+	TEST_ASSERT_EQUAL_size_t(0, nfds);
+
+	/*
+	 * no MSG_CTRUNC as in our implementation control data is not read on peek
+	 * (not tested on host either because this is not a behavior to depend on)
+	 */
+	TEST_ASSERT_BITS_HIGH(MSG_TRUNC, msg.msg_flags);
+
+	/* try peeking the data again */
+	nfds = MAX_FD_CNT;
+	setup_msg(&msg, &iov, restbuf, sizeof(restbuf), cbuf, CMSG_LEN(sizeof(int) * MAX_FD_CNT));
+	TEST_ASSERT_EQUAL(sizeof(restbuf), recvmsg(sv[1], &msg, MSG_PEEK));
+	TEST_ASSERT_EQUAL(0, unpack_fds(&msg, recvfds, &nfds));
+
+	TEST_ASSERT_EQUAL_MEMORY(payload, restbuf, sizeof(restbuf));
+
+#ifdef __phoenix__
+	TEST_ASSERT_EQUAL_size_t(0, nfds);
+#else
+	/* on host, control data might be peeked */
+	if (nfds == MAX_FD_CNT) {
+		TEST_ASSERT_EQUAL(0, close_files(recvfds, MAX_FD_CNT));
+	}
+	TEST_ASSERT(nfds == 0 || nfds == MAX_FD_CNT);
+#endif
+
+	/* consume the data */
+	nfds = MAX_FD_CNT;
+	setup_msg(&msg, &iov, restbuf, sizeof(restbuf), cbuf, CMSG_LEN(sizeof(int) * MAX_FD_CNT));
+	TEST_ASSERT_EQUAL(sizeof(restbuf), recvmsg(sv[1], &msg, 0));
+	TEST_ASSERT_EQUAL(0, unpack_fds(&msg, recvfds, &nfds));
+
+	TEST_ASSERT_EQUAL_MEMORY(payload, restbuf, sizeof(restbuf));
+	TEST_ASSERT_EQUAL_size_t(MAX_FD_CNT, nfds);
+	TEST_ASSERT_EQUAL(0, write_files(sendfds, nfds, data));
+	TEST_ASSERT_EQUAL(0, read_files(recvfds, nfds, data, buf));
+
+	/* try reading empty buffer */
+	setup_msg(&msg, &iov, restbuf, sizeof(restbuf), cbuf, sizeof(cbuf));
+	errno = 0;
+	TEST_ASSERT_EQUAL(-1, recvmsg(sv[1], &msg, MSG_DONTWAIT));
+	TEST_ASSERT_EQUAL(EWOULDBLOCK, errno);
+
+	TEST_ASSERT_EQUAL(0, unlink_files(MAX_FD_CNT));
+}
+
+
+static void unix_trunc_as_input_flag_framed(int type)
+{
+	char buf[8];
+	struct iovec iov;
+	struct msghdr msg;
+
+	TEST_ASSERT_EQUAL(0, socketpair(AF_UNIX, type, 0, sv));
+	TEST_ASSERT_EQUAL(5, msg_send(sv[0], "HELLO", 5, NULL, 0));
+
+	/* only PEEK: return value == buflen, MSG_TRUNC output flag set */
+	setup_msg(&msg, &iov, buf, 4, NULL, 0);
+	TEST_ASSERT_EQUAL(4, recvmsg(sv[1], &msg, MSG_PEEK));
+	TEST_ASSERT_BITS_HIGH(MSG_TRUNC, msg.msg_flags);
+
+	/* PEEK + TRUNk: return value == sent packet length, MSG_TRUNC output flag set */
+	setup_msg(&msg, &iov, buf, 4, NULL, 0);
+	TEST_ASSERT_EQUAL(5, recvmsg(sv[1], &msg, MSG_PEEK | MSG_TRUNC));
+	TEST_ASSERT_BITS_HIGH(MSG_TRUNC, msg.msg_flags);
+
+	/* PEEK + TRUNC: return value == sent packet length, MSG_TRUNC output flag clear */
+	setup_msg(&msg, &iov, buf, sizeof(buf), NULL, 0);
+	TEST_ASSERT_EQUAL(5, recvmsg(sv[1], &msg, MSG_PEEK | MSG_TRUNC));
+	TEST_ASSERT_BITS_LOW(MSG_TRUNC, msg.msg_flags);
+
+	TEST_ASSERT_EQUAL(0, close(sv[0]));
+	sv[0] = -1;
+	TEST_ASSERT_EQUAL(0, close(sv[1]));
+	sv[1] = -1;
+}
+
+static void unix_trunc_as_input_flag_stream(void)
+{
+	char buf[8];
+	struct iovec iov;
+	struct msghdr msg;
+
+	TEST_ASSERT_EQUAL(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+	TEST_ASSERT_EQUAL(5, msg_send(sv[0], "HELLO", 5, NULL, 0));
+
+	setup_msg(&msg, &iov, buf, 4, NULL, 0);
+	TEST_ASSERT_EQUAL(4, recvmsg(sv[1], &msg, MSG_PEEK));
+	TEST_ASSERT_BITS_LOW(MSG_TRUNC, msg.msg_flags);
+
+	/* in stream socket, MSG_TRUNC doesn't work as input flag */
+	setup_msg(&msg, &iov, buf, 4, NULL, 0);
+	TEST_ASSERT_EQUAL(4, recvmsg(sv[1], &msg, MSG_PEEK | MSG_TRUNC));
+	TEST_ASSERT_BITS_LOW(MSG_TRUNC, msg.msg_flags);
+
+	TEST_ASSERT_EQUAL(0, close(sv[0]));
+	sv[0] = -1;
+	TEST_ASSERT_EQUAL(0, close(sv[1]));
+	sv[1] = -1;
+}
+
+
+TEST(test_unix_socket, trunc_as_input_flag)
+{
+	unix_trunc_as_input_flag_framed(SOCK_DGRAM);
+	unix_trunc_as_input_flag_framed(SOCK_SEQPACKET);
+
+	unix_trunc_as_input_flag_stream();
 }
 
 
@@ -3461,6 +3745,577 @@ TEST(test_unix_socket, af_unspec)
 }
 
 
+/*
+ * getsockname()/getpeername(). The address of a UNIX socket is the path it was
+ * bound to, reported with its terminating null, so a bound socket answers with
+ * sizeof(sa_family_t) + strlen(path) + 1 bytes and a socket that was never
+ * given a name answers with the family alone. POSIX 1003.1g asks for the
+ * length before truncation, so `len` comes back as the length the address
+ * really has, whatever the caller's buffer could take.
+ */
+#define UNIX_ADDR_HDR ((socklen_t)offsetof(struct sockaddr_un, sun_path))
+
+
+static void unix_name_expect(int fd, int peer, const char *path, const char *what)
+{
+	struct sockaddr_un addr;
+	socklen_t len = sizeof(addr);
+	socklen_t expected = UNIX_ADDR_HDR + ((path != NULL) ? (socklen_t)strlen(path) + 1u : 0u);
+	char msg[128];
+	int rv;
+
+	memset(&addr, 0xAA, sizeof(addr));
+	errno = 0;
+	rv = peer ? getpeername(fd, (struct sockaddr *)&addr, &len) : getsockname(fd, (struct sockaddr *)&addr, &len);
+	if (rv < 0) {
+		snprintf(msg, sizeof(msg), "%s: %s", what, strerror(errno));
+		FAIL(msg);
+	}
+
+	snprintf(msg, sizeof(msg), "%s: length %u, expected %u", what, (unsigned int)len, (unsigned int)expected);
+	TEST_ASSERT_EQUAL_INT_MESSAGE(expected, len, msg);
+
+	snprintf(msg, sizeof(msg), "%s: family", what);
+	TEST_ASSERT_EQUAL_INT_MESSAGE(AF_UNIX, addr.sun_family, msg);
+
+	if (path != NULL) {
+		snprintf(msg, sizeof(msg), "%s: path", what);
+		TEST_ASSERT_EQUAL_STRING_MESSAGE(path, addr.sun_path, msg);
+	}
+}
+
+
+static void unix_name_expect_error(int fd, int peer, int expected, const char *what)
+{
+	struct sockaddr_un addr;
+	socklen_t len = sizeof(addr);
+	char msg[128];
+	int rv;
+
+	memset(&addr, 0xAA, sizeof(addr));
+	errno = 0;
+	rv = peer ? getpeername(fd, (struct sockaddr *)&addr, &len) : getsockname(fd, (struct sockaddr *)&addr, &len);
+
+	snprintf(msg, sizeof(msg), "%s: returned %d, errno %d", what, rv, errno);
+	TEST_ASSERT_EQUAL_INT_MESSAGE(-1, rv, msg);
+	TEST_ASSERT_EQUAL_INT_MESSAGE(expected, errno, msg);
+}
+
+
+static void unix_name_unnamed(int type)
+{
+	const char *tn = (type == SOCK_STREAM) ? "stream" : ((type == SOCK_SEQPACKET) ? "seqpacket" : "dgram");
+	char what[64];
+	int fd[2];
+
+	fd[0] = socket(AF_UNIX, type, 0);
+	if (fd[0] < 0) {
+		FAIL("socket");
+	}
+
+	snprintf(what, sizeof(what), "%s, fresh socket, getsockname", tn);
+	unix_name_expect(fd[0], 0, NULL, what);
+
+	snprintf(what, sizeof(what), "%s, fresh socket, getpeername", tn);
+	unix_name_expect_error(fd[0], 1, ENOTCONN, what);
+
+	close(fd[0]);
+
+	/* a socketpair is connected, but neither end has a name */
+	if (socketpair(AF_UNIX, type, 0, fd) < 0) {
+		FAIL("socketpair");
+	}
+
+	snprintf(what, sizeof(what), "%s, socketpair, getsockname", tn);
+	unix_name_expect(fd[0], 0, NULL, what);
+
+	snprintf(what, sizeof(what), "%s, socketpair, getpeername", tn);
+	unix_name_expect(fd[0], 1, NULL, what);
+
+	close(fd[0]);
+	close(fd[1]);
+}
+
+
+TEST(test_unix_socket, getsockname_unnamed)
+{
+	unix_name_unnamed(SOCK_STREAM);
+	unix_name_unnamed(SOCK_SEQPACKET);
+	unix_name_unnamed(SOCK_DGRAM);
+}
+
+
+static void unix_name_bound(int type)
+{
+	const char *path = "/tmp/test_getsockname";
+	const char *other = "/tmp/test_getsockname_2";
+	const char *tn = (type == SOCK_STREAM) ? "stream" : ((type == SOCK_SEQPACKET) ? "seqpacket" : "dgram");
+	struct sockaddr_un addr = { 0 };
+	char what[64];
+	int fd;
+
+	fd = unix_named_socket(type, path);
+	if (fd < 0) {
+		FAIL("unix_named_socket");
+	}
+
+	snprintf(what, sizeof(what), "%s, bound, getsockname", tn);
+	unix_name_expect(fd, 0, path, what);
+
+	snprintf(what, sizeof(what), "%s, bound, getpeername", tn);
+	unix_name_expect_error(fd, 1, ENOTCONN, what);
+
+	/* a socket has one name and keeps it: a second bind() is refused */
+	addr.sun_family = AF_UNIX;
+	strcpy(addr.sun_path, other);
+	errno = 0;
+	TEST_ASSERT_EQUAL_INT(-1, bind(fd, (struct sockaddr *)&addr, SUN_LEN(&addr)));
+	TEST_ASSERT_EQUAL_INT(EINVAL, errno);
+
+	/* the name is the socket's own, not the directory entry's */
+	TEST_ASSERT_EQUAL_INT(0, unlink(path));
+
+	snprintf(what, sizeof(what), "%s, bound, getsockname after unlink", tn);
+	unix_name_expect(fd, 0, path, what);
+
+	close(fd);
+}
+
+
+TEST(test_unix_socket, getsockname_bound)
+{
+	unix_name_bound(SOCK_STREAM);
+	unix_name_bound(SOCK_SEQPACKET);
+	unix_name_bound(SOCK_DGRAM);
+}
+
+
+static void unix_name_connected(int type, int bindClient)
+{
+	const char *path = "/tmp/test_getsockname";
+	const char *cpath = "/tmp/test_getsockname_client";
+	const char *other = "/tmp/test_getsockname_2";
+	const char *tn = (type == SOCK_STREAM) ? "stream" : "seqpacket";
+	const char *peer = (bindClient != 0) ? cpath : NULL;
+	struct sockaddr_un addr;
+	socklen_t len = sizeof(addr);
+	char what[80];
+	int ls, cl, ns;
+
+	ls = unix_named_socket(type, path);
+	if (ls < 0) {
+		FAIL("unix_named_socket");
+	}
+	TEST_ASSERT_EQUAL_INT(0, listen(ls, 1));
+
+	if (bindClient != 0) {
+		cl = unix_named_socket(type, cpath);
+		if (cl < 0) {
+			FAIL("unix_named_socket");
+		}
+	}
+	else {
+		cl = socket(AF_UNIX, type, 0);
+		if (cl < 0) {
+			FAIL("socket");
+		}
+	}
+
+	/*
+	 * A blocking connect() waits for the accept() that only comes below, so the
+	 * client is made non-blocking first: Phoenix leaves the attempt in progress,
+	 * Linux takes it at once.
+	 */
+	if (set_nonblock(cl, 1) < 0) {
+		FAIL("set_nonblock");
+	}
+
+	errno = 0;
+	if ((connect_to_named(cl, path) < 0) && (errno != EINPROGRESS)) {
+		FAIL("connect");
+	}
+
+	/* accept() answers with the address the new socket's getpeername() would */
+	memset(&addr, 0xAA, sizeof(addr));
+	ns = accept(ls, (struct sockaddr *)&addr, &len);
+	if (ns < 0) {
+		FAIL("accept");
+	}
+
+	snprintf(what, sizeof(what), "%s, %s client, accept() address length",
+			tn, (bindClient != 0) ? "bound" : "unnamed");
+	TEST_ASSERT_EQUAL_INT_MESSAGE(UNIX_ADDR_HDR + ((peer != NULL) ? strlen(peer) + 1u : 0u), len, what);
+	TEST_ASSERT_EQUAL_INT_MESSAGE(AF_UNIX, addr.sun_family, what);
+	if (peer != NULL) {
+		TEST_ASSERT_EQUAL_STRING_MESSAGE(peer, addr.sun_path, what);
+	}
+
+	snprintf(what, sizeof(what), "%s, client getpeername", tn);
+	unix_name_expect(cl, 1, path, what);
+
+	snprintf(what, sizeof(what), "%s, client getsockname", tn);
+	unix_name_expect(cl, 0, peer, what);
+
+	/* the connection is named after the socket it was accepted on */
+	snprintf(what, sizeof(what), "%s, accepted getsockname", tn);
+	unix_name_expect(ns, 0, path, what);
+
+	snprintf(what, sizeof(what), "%s, accepted getpeername", tn);
+	unix_name_expect(ns, 1, peer, what);
+
+	snprintf(what, sizeof(what), "%s, listener getsockname", tn);
+	unix_name_expect(ls, 0, path, what);
+
+	/* an accepted socket already has a name, so it cannot be bound */
+	memset(&addr, 0, sizeof(addr));
+	addr.sun_family = AF_UNIX;
+	strcpy(addr.sun_path, other);
+	errno = 0;
+	TEST_ASSERT_EQUAL_INT(-1, bind(ns, (struct sockaddr *)&addr, SUN_LEN(&addr)));
+	TEST_ASSERT_EQUAL_INT(EINVAL, errno);
+
+	/* both names outlive the listener and its directory entry */
+	close(ls);
+	TEST_ASSERT_EQUAL_INT(0, unlink(path));
+
+	snprintf(what, sizeof(what), "%s, accepted getsockname after listener close", tn);
+	unix_name_expect(ns, 0, path, what);
+
+	snprintf(what, sizeof(what), "%s, client getpeername after listener close", tn);
+	unix_name_expect(cl, 1, path, what);
+
+	/* and the peer's name is still there once the peer itself is gone */
+	close(cl);
+
+	snprintf(what, sizeof(what), "%s, accepted getpeername after client close", tn);
+	unix_name_expect(ns, 1, peer, what);
+
+	close(ns);
+
+	if (bindClient != 0) {
+		TEST_ASSERT_EQUAL_INT(0, unlink(cpath));
+	}
+}
+
+
+TEST(test_unix_socket, getsockname_connected)
+{
+	unix_name_connected(SOCK_STREAM, 0);
+	unix_name_connected(SOCK_SEQPACKET, 0);
+
+	unix_name_connected(SOCK_STREAM, 1);
+	unix_name_connected(SOCK_SEQPACKET, 1);
+}
+
+
+TEST(test_unix_socket, getsockname_dgram_connected)
+{
+	const char *path = "/tmp/test_getsockname";
+	struct sockaddr addr = { 0 };
+	int fd, target;
+
+	target = unix_named_socket(SOCK_DGRAM, path);
+	if (target < 0) {
+		FAIL("unix_named_socket");
+	}
+
+	fd = socket(AF_UNIX, SOCK_DGRAM, 0);
+	if (fd < 0) {
+		FAIL("socket");
+	}
+
+	TEST_ASSERT_EQUAL_INT(0, connect_to_named(fd, path));
+
+	unix_name_expect(fd, 1, path, "dgram, connected, getpeername");
+	unix_name_expect(fd, 0, NULL, "dgram, connected, getsockname");
+
+	/* the target of a datagram socket is not connected to anything itself */
+	unix_name_expect_error(target, 1, ENOTCONN, "dgram, target, getpeername");
+
+	/* AF_UNSPEC takes the connection away, and the peer's name with it */
+	addr.sa_family = AF_UNSPEC;
+	TEST_ASSERT_EQUAL_INT(0, connect(fd, &addr, sizeof(addr)));
+	unix_name_expect_error(fd, 1, ENOTCONN, "dgram, after AF_UNSPEC, getpeername");
+
+	/* and a new connect() brings it back */
+	TEST_ASSERT_EQUAL_INT(0, connect_to_named(fd, path));
+	unix_name_expect(fd, 1, path, "dgram, reconnected, getpeername");
+
+	close(fd);
+	close(target);
+	TEST_ASSERT_EQUAL_INT(0, unlink(path));
+}
+
+
+TEST(test_unix_socket, getsockname_truncation)
+{
+	const char *path = "/tmp/test_getsockname";
+	socklen_t full = UNIX_ADDR_HDR + (socklen_t)strlen(path) + 1u;
+	_Alignas(struct sockaddr_un) unsigned char buf[sizeof(struct sockaddr_un)];
+	socklen_t len;
+	int fd;
+
+	fd = unix_named_socket(SOCK_STREAM, path);
+	if (fd < 0) {
+		FAIL("unix_named_socket");
+	}
+
+	/* room for four characters of the path: the rest is dropped, not reported short */
+	memset(buf, 0xAA, sizeof(buf));
+	len = UNIX_ADDR_HDR + 4u;
+	TEST_ASSERT_EQUAL_INT(0, getsockname(fd, (struct sockaddr *)buf, &len));
+	TEST_ASSERT_EQUAL_INT(full, len);
+	TEST_ASSERT_EQUAL_INT(0, memcmp(buf + UNIX_ADDR_HDR, path, 4));
+	TEST_ASSERT_EQUAL_UINT8(0xAA, buf[UNIX_ADDR_HDR + 4u]);
+
+	/* no room at all: nothing is stored, the length is still the real one */
+	memset(buf, 0xAA, sizeof(buf));
+	len = 0;
+	TEST_ASSERT_EQUAL_INT(0, getsockname(fd, (struct sockaddr *)buf, &len));
+	TEST_ASSERT_EQUAL_INT(full, len);
+	TEST_ASSERT_EQUAL_UINT8(0xAA, buf[0]);
+
+	close(fd);
+	TEST_ASSERT_EQUAL_INT(0, unlink(path));
+}
+
+
+TEST(test_unix_socket, getsockname_errnos)
+{
+	const char *path = "/tmp/test_getsockname_file";
+	int fd;
+
+	unix_name_expect_error(BAD_FD, 0, EBADF, "getsockname, bad descriptor");
+	unix_name_expect_error(BAD_FD, 1, EBADF, "getpeername, bad descriptor");
+
+	fd = open(path, O_CREAT | O_RDWR, 0666);
+	if (fd < 0) {
+		FAIL("open");
+	}
+
+	unix_name_expect_error(fd, 0, ENOTSOCK, "getsockname, regular file");
+	unix_name_expect_error(fd, 1, ENOTSOCK, "getpeername, regular file");
+
+	close(fd);
+	TEST_ASSERT_EQUAL_INT(0, unlink(path));
+}
+
+
+/*
+ * recvfrom() reports the name the datagram was sent under. A sender with no
+ * name of its own is reported by leaving the length at zero rather than by an
+ * empty address, and a connected socket - whatever its type - reports nothing
+ * at all. All of it as Linux does.
+ */
+
+
+static int unix_sendto_named(int fd, const void *buf, size_t len, const char *name)
+{
+	struct sockaddr_un addr = { 0 };
+
+	addr.sun_family = AF_UNIX;
+	strcpy(addr.sun_path, name);
+
+	return (int)sendto(fd, buf, len, 0, (struct sockaddr *)&addr, SUN_LEN(&addr));
+}
+
+
+static void unix_src_expect(int fd, int flags, const char *path, const char *what)
+{
+	struct sockaddr_un addr;
+	socklen_t len = sizeof(addr);
+	socklen_t expected = (path != NULL) ? (UNIX_ADDR_HDR + (socklen_t)strlen(path) + 1u) : 0u;
+	char msg[128];
+	char data[8];
+	ssize_t n;
+
+	memset(&addr, 0xAA, sizeof(addr));
+	errno = 0;
+	n = recvfrom(fd, data, sizeof(data), flags, (struct sockaddr *)&addr, &len);
+	if (n < 0) {
+		snprintf(msg, sizeof(msg), "%s: recvfrom: %s", what, strerror(errno));
+		FAIL(msg);
+	}
+
+	snprintf(msg, sizeof(msg), "%s: source length %u, expected %u", what, (unsigned int)len, (unsigned int)expected);
+	TEST_ASSERT_EQUAL_INT_MESSAGE(expected, len, msg);
+
+	if (path != NULL) {
+		snprintf(msg, sizeof(msg), "%s: source family", what);
+		TEST_ASSERT_EQUAL_INT_MESSAGE(AF_UNIX, addr.sun_family, msg);
+
+		snprintf(msg, sizeof(msg), "%s: source path", what);
+		TEST_ASSERT_EQUAL_STRING_MESSAGE(path, addr.sun_path, msg);
+	}
+}
+
+
+TEST(test_unix_socket, recvfrom_src_addr)
+{
+	const char *rpath = "/tmp/test_recvfrom_src";
+	const char *spath = "/tmp/test_recvfrom_src_sender";
+	const char *gpath = "/tmp/test_recvfrom_src_gone";
+	int r, named, nameless, gone;
+
+	r = unix_named_socket(SOCK_DGRAM, rpath);
+	named = unix_named_socket(SOCK_DGRAM, spath);
+	if ((r < 0) || (named < 0)) {
+		FAIL("unix_named_socket");
+	}
+
+	nameless = socket(AF_UNIX, SOCK_DGRAM, 0);
+	if (nameless < 0) {
+		FAIL("socket");
+	}
+
+	TEST_ASSERT_EQUAL_INT(1, unix_sendto_named(named, "a", 1, rpath));
+	unix_src_expect(r, 0, spath, "datagram from a named sender");
+
+	TEST_ASSERT_EQUAL_INT(1, unix_sendto_named(nameless, "b", 1, rpath));
+	unix_src_expect(r, 0, NULL, "datagram from a nameless sender");
+
+	/* a peek reports the source and leaves the datagram where it is */
+	TEST_ASSERT_EQUAL_INT(1, unix_sendto_named(named, "c", 1, rpath));
+	unix_src_expect(r, MSG_PEEK, spath, "peeked datagram");
+	unix_src_expect(r, 0, spath, "the same datagram, taken");
+
+	/* the name outlives the sender and its directory entry */
+	gone = unix_named_socket(SOCK_DGRAM, gpath);
+	if (gone < 0) {
+		FAIL("unix_named_socket");
+	}
+	TEST_ASSERT_EQUAL_INT(1, unix_sendto_named(gone, "d", 1, rpath));
+	close(gone);
+	TEST_ASSERT_EQUAL_INT(0, unlink(gpath));
+	unix_src_expect(r, 0, gpath, "sender closed before the datagram was read");
+
+	/* a connected sender is reported the same way, send() and all */
+	TEST_ASSERT_EQUAL_INT(0, connect_to_named(named, rpath));
+	TEST_ASSERT_EQUAL_INT(1, send(named, "e", 1, 0));
+	unix_src_expect(r, 0, spath, "datagram from a connected named sender");
+
+	/* the datagrams queue up in order, each with the name it was sent under */
+	TEST_ASSERT_EQUAL_INT(1, unix_sendto_named(nameless, "f", 1, rpath));
+	TEST_ASSERT_EQUAL_INT(1, send(named, "g", 1, 0));
+	TEST_ASSERT_EQUAL_INT(1, unix_sendto_named(nameless, "h", 1, rpath));
+	unix_src_expect(r, 0, NULL, "first of three, nameless");
+	unix_src_expect(r, 0, spath, "second of three, named");
+	unix_src_expect(r, 0, NULL, "third of three, nameless");
+
+	close(nameless);
+	close(named);
+	close(r);
+	TEST_ASSERT_EQUAL_INT(0, unlink(spath));
+	TEST_ASSERT_EQUAL_INT(0, unlink(rpath));
+}
+
+
+TEST(test_unix_socket, recvfrom_src_addr_truncation)
+{
+	const char *rpath = "/tmp/test_recvfrom_src";
+	const char *spath = "/tmp/test_recvfrom_src_sender";
+	socklen_t full = UNIX_ADDR_HDR + (socklen_t)strlen("/tmp/test_recvfrom_src_sender") + 1u;
+	_Alignas(struct sockaddr_un) unsigned char addr[sizeof(struct sockaddr_un)];
+	socklen_t len;
+	char data[8];
+	int r, s;
+
+	r = unix_named_socket(SOCK_DGRAM, rpath);
+	s = unix_named_socket(SOCK_DGRAM, spath);
+	if ((r < 0) || (s < 0)) {
+		FAIL("unix_named_socket");
+	}
+
+	/* room for four characters of the path: the length before truncation is reported */
+	TEST_ASSERT_EQUAL_INT(1, unix_sendto_named(s, "a", 1, rpath));
+	memset(addr, 0xAA, sizeof(addr));
+	len = UNIX_ADDR_HDR + 4u;
+	TEST_ASSERT_EQUAL_INT(1, recvfrom(r, data, sizeof(data), 0, (struct sockaddr *)addr, &len));
+	TEST_ASSERT_EQUAL_INT(full, len);
+	TEST_ASSERT_EQUAL_INT(0, memcmp(addr + UNIX_ADDR_HDR, spath, 4));
+	TEST_ASSERT_EQUAL_UINT8(0xAA, addr[UNIX_ADDR_HDR + 4u]);
+
+	/* no room at all */
+	TEST_ASSERT_EQUAL_INT(1, unix_sendto_named(s, "b", 1, rpath));
+	memset(addr, 0xAA, sizeof(addr));
+	len = 0;
+	TEST_ASSERT_EQUAL_INT(1, recvfrom(r, data, sizeof(data), 0, (struct sockaddr *)addr, &len));
+	TEST_ASSERT_EQUAL_INT(full, len);
+	TEST_ASSERT_EQUAL_UINT8(0xAA, addr[0]);
+
+	close(s);
+	close(r);
+	TEST_ASSERT_EQUAL_INT(0, unlink(spath));
+	TEST_ASSERT_EQUAL_INT(0, unlink(rpath));
+}
+
+
+TEST(test_unix_socket, recvmsg_msg_name)
+{
+	const char *rpath = "/tmp/test_recvfrom_src";
+	const char *spath = "/tmp/test_recvfrom_src_sender";
+	struct sockaddr_un addr;
+	struct msghdr msg = { 0 };
+	struct iovec iov;
+	char data[8];
+	int r, s;
+
+	r = unix_named_socket(SOCK_DGRAM, rpath);
+	s = unix_named_socket(SOCK_DGRAM, spath);
+	if ((r < 0) || (s < 0)) {
+		FAIL("unix_named_socket");
+	}
+
+	TEST_ASSERT_EQUAL_INT(1, unix_sendto_named(s, "a", 1, rpath));
+
+	memset(&addr, 0xAA, sizeof(addr));
+	iov.iov_base = data;
+	iov.iov_len = sizeof(data);
+	msg.msg_name = &addr;
+	msg.msg_namelen = sizeof(addr);
+	msg.msg_iov = &iov;
+	msg.msg_iovlen = 1;
+
+	TEST_ASSERT_EQUAL_INT(1, recvmsg(r, &msg, 0));
+	TEST_ASSERT_EQUAL_INT(UNIX_ADDR_HDR + strlen(spath) + 1u, msg.msg_namelen);
+	TEST_ASSERT_EQUAL_INT(AF_UNIX, addr.sun_family);
+	TEST_ASSERT_EQUAL_STRING(spath, addr.sun_path);
+
+	close(s);
+	close(r);
+	TEST_ASSERT_EQUAL_INT(0, unlink(spath));
+	TEST_ASSERT_EQUAL_INT(0, unlink(rpath));
+}
+
+
+static void unix_src_connected(int type)
+{
+	const char *tn = (type == SOCK_STREAM) ? "stream" : ((type == SOCK_SEQPACKET) ? "seqpacket" : "dgram");
+	char what[64];
+	int fd[2];
+
+	if (socketpair(AF_UNIX, type, 0, fd) < 0) {
+		FAIL("socketpair");
+	}
+
+	TEST_ASSERT_EQUAL_INT(1, send(fd[0], "a", 1, 0));
+
+	snprintf(what, sizeof(what), "%s socketpair, both ends nameless", tn);
+	unix_src_expect(fd[1], 0, NULL, what);
+
+	close(fd[0]);
+	close(fd[1]);
+}
+
+
+TEST(test_unix_socket, recvfrom_src_addr_connected)
+{
+	unix_src_connected(SOCK_STREAM);
+	unix_src_connected(SOCK_SEQPACKET);
+	unix_src_connected(SOCK_DGRAM);
+}
+
+
 TEST_GROUP_RUNNER(test_unix_socket)
 {
 	RUN_TEST_CASE(test_unix_socket, zero_len_send);
@@ -3483,6 +4338,12 @@ TEST_GROUP_RUNNER(test_unix_socket)
 	RUN_TEST_CASE(test_unix_socket, poll_shut_wr_writable);
 	RUN_TEST_CASE(test_unix_socket, poll_full_shut_writable);
 	RUN_TEST_CASE(test_unix_socket, recv_msg_peek);
+	RUN_TEST_CASE(test_unix_socket, trunc_basic);
+	RUN_TEST_CASE(test_unix_socket, trunc_peek);
+	RUN_TEST_CASE(test_unix_socket, ctrunc_basic);
+	RUN_TEST_CASE(test_unix_socket, trunc_and_ctrunc);
+	RUN_TEST_CASE(test_unix_socket, trunc_and_ctrunc_peek);
+	RUN_TEST_CASE(test_unix_socket, trunc_as_input_flag);
 	RUN_TEST_CASE(test_unix_socket, accept_connect_errnos);
 	RUN_TEST_CASE(test_unix_socket, accept_connect_async);
 	RUN_TEST_CASE(test_unix_socket, accept_connect_liveness);
@@ -3511,6 +4372,16 @@ TEST_GROUP_RUNNER(test_unix_socket)
 	RUN_TEST_CASE(test_unix_socket, fd_per_message);
 	RUN_TEST_CASE(test_unix_socket, fd_not_carried_over);
 	RUN_TEST_CASE(test_unix_socket, message_4096);
+	RUN_TEST_CASE(test_unix_socket, getsockname_unnamed);
+	RUN_TEST_CASE(test_unix_socket, getsockname_bound);
+	RUN_TEST_CASE(test_unix_socket, getsockname_connected);
+	RUN_TEST_CASE(test_unix_socket, getsockname_dgram_connected);
+	RUN_TEST_CASE(test_unix_socket, getsockname_truncation);
+	RUN_TEST_CASE(test_unix_socket, getsockname_errnos);
+	RUN_TEST_CASE(test_unix_socket, recvfrom_src_addr);
+	RUN_TEST_CASE(test_unix_socket, recvfrom_src_addr_truncation);
+	RUN_TEST_CASE(test_unix_socket, recvmsg_msg_name);
+	RUN_TEST_CASE(test_unix_socket, recvfrom_src_addr_connected);
 }
 
 /*
