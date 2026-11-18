@@ -478,7 +478,7 @@ int main(int argc, char *argv[])
 	unsigned long long devSize, freeBefore, freeHigh, wUs = 0, rUs = 0;
 	struct timespec ts;
 	struct stat st;
-	int c, yes = 0, seedGiven = 0, truncated, pass1;
+	int c, yes = 0, seedGiven = 0, rangeGiven = 0, truncated, pass1;
 	char *end;
 
 	common.range = DEFAULT_RANGE;
@@ -492,6 +492,7 @@ int main(int argc, char *argv[])
 				break;
 			case 's':
 				common.range = parseSize(optarg);
+				rangeGiven = 1;
 				if (common.range == 0U) {
 					fprintf(stderr, "dmapressure: bad size '%s'\n", optarg);
 					return 2;
@@ -539,8 +540,20 @@ int main(int argc, char *argv[])
 		devSize = (unsigned long long)st.st_size;
 	}
 	if (devSize == 0U) {
-		fprintf(stderr, "dmapressure: %s reports no size; is it a block device?\n", common.path);
-		return 2;
+		/* Some storage servers do not report a size through stat(); try seeking to the end */
+		off_t end = lseek(common.fd, 0, SEEK_END);
+		if ((end > 0) && (lseek(common.fd, 0, SEEK_SET) == 0)) {
+			devSize = (unsigned long long)end;
+		}
+	}
+	if (devSize == 0U) {
+		/* Still unknown: trust the range the user gave explicitly with -s */
+		if (rangeGiven == 0) {
+			fprintf(stderr, "dmapressure: %s reports no size; give the range to test with -s\n", common.path);
+			return 2;
+		}
+		fprintf(stderr, "dmapressure: %s reports no size; testing the -s range as given\n", common.path);
+		devSize = common.range;
 	}
 	if (common.range > devSize) {
 		common.range = devSize;
