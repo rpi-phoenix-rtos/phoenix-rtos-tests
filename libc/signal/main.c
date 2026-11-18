@@ -29,6 +29,7 @@ void runner(void)
 	RUN_TEST_GROUP(liveness);
 	RUN_TEST_GROUP(siginfo);
 	RUN_TEST_GROUP(sigaltstack);
+	RUN_TEST_GROUP(faultsig);
 }
 
 
