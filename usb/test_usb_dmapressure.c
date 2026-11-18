@@ -104,6 +104,7 @@ static struct {
 	size_t hogLen[HOG_CHUNKS_MAX];
 	unsigned int hogChunks;
 	unsigned long long hogBytes;
+	int highOnly;
 
 	unsigned long long badSectors;
 	unsigned long long ioErrSectors;
@@ -129,6 +130,7 @@ static void usage(const char *prog)
 	printf("           the device size)\n");
 	printf("  -f SIZE  free memory to leave to the rest of the system (default 300M)\n");
 	printf("  -S SEED  pattern seed (default: from the clock)\n");
+	printf("  -H       keep only memory above 3 GiB free (low pages stay held), so USB DMA must\n           cope with high memory: data must stay correct (errors are acceptable)\n");
 	printf("  SIZE takes a K, M or G suffix; a bare number is in MiB.\n");
 	printf("\n");
 	printf("DEVICE is a USB mass-storage node, /dev/umassN, N counting from 0 over the\n");
@@ -284,6 +286,33 @@ static void hogMemory(void)
 		common.hogChunks++;
 		common.hogBytes += len;
 	}
+}
+
+
+/*
+ * -H: give back every held page at or above HIGH_MEMORY, so the only free memory
+ * left (apart from the -f margin) is high. The USB stack's next DMA allocations
+ * then come from the region the VL805 corrupts; a correct stack either places
+ * them below it anyway or fails the transfer, but never returns wrong data.
+ */
+static unsigned long long hogKeepLowOnly(void)
+{
+	unsigned long long released = 0;
+	unsigned int c;
+	size_t off;
+
+	for (c = 0; c < common.hogChunks; c++) {
+		for (off = 0; off < common.hogLen[c]; off += common.pagesz) {
+			unsigned char *pg = (unsigned char *)common.hog[c] + off;
+			if ((unsigned long long)va2pa(pg) >= HIGH_MEMORY) {
+				if (munmap(pg, common.pagesz) == 0) {
+					released += common.pagesz;
+				}
+			}
+		}
+	}
+	common.hogBytes -= released;
+	return released;
 }
 
 
@@ -485,7 +514,7 @@ int main(int argc, char *argv[])
 	common.leave = DEFAULT_LEAVE;
 	common.pagesz = (size_t)sysconf(_SC_PAGESIZE);
 
-	while ((c = getopt(argc, argv, "ys:f:S:h")) != -1) {
+	while ((c = getopt(argc, argv, "ys:f:S:Hh")) != -1) {
 		switch (c) {
 			case 'y':
 				yes = 1;
@@ -504,6 +533,9 @@ int main(int argc, char *argv[])
 					fprintf(stderr, "dmapressure: bad size '%s'\n", optarg);
 					return 2;
 				}
+				break;
+			case 'H':
+				common.highOnly = 1;
 				break;
 			case 'S':
 				errno = 0;
@@ -589,6 +621,10 @@ int main(int argc, char *argv[])
 
 	freeBefore = freeMemory();
 	hogMemory();
+	if (common.highOnly != 0) {
+		printf("dmapressure: -H gave back %llu MiB above 0x%llx; only high memory is free now\n",
+			hogKeepLowOnly() / MIB, HIGH_MEMORY);
+	}
 	freeHigh = freeHighMemory(&truncated);
 
 	printf("dmapressure: seed 0x%llx; free memory %llu MiB, held %llu MiB, %llu MiB left free (%s%llu MiB of it at or above 0x%llx)\n",
