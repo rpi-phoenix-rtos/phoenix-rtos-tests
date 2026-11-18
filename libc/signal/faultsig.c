@@ -299,11 +299,19 @@ static void faultsig_landing(void)
 }
 
 
-static void faultsig_sigreturnChild(uint64_t psr)
+/* Room for the landing function, the tick handler and the signal frame the
+ * kernel pushes below the landing sp (two cpu_context_t at most, about 1.6 KiB
+ * on aarch64). It must fit, with this function's caller chain, in the main
+ * thread's stack, which libc/Makefile links at 12 KiB (-z stack-size=12288):
+ * a larger buffer runs the child off its stack before it reaches sigreturn. */
+#define FAULTSIG_LANDING_STACK 4096U
+
+
+static void faultsig_sigreturnChild(uint64_t psr, int markerFd)
 {
 	/* The landing function runs on this, inside the thread's own stack: the
 	 * kernel pushes a signal frame only within the stack it knows of */
-	unsigned char landingStack[16384] __attribute__((aligned(16)));
+	unsigned char landingStack[FAULTSIG_LANDING_STACK] __attribute__((aligned(16)));
 	struct sigaction sa;
 	pthread_t kicker;
 
@@ -319,6 +327,11 @@ static void faultsig_sigreturnChild(uint64_t psr)
 		_exit(3);
 	}
 
+	/* Tell the parent that a death from here on is sigreturn's doing */
+	if (write(markerFd, "s", 1) != 1) {
+		_exit(5);
+	}
+
 	sigreturn(0U, faultsig_ctx, (uintptr_t)faultsig_landing, (uintptr_t)(landingStack + sizeof(landingStack)), psr);
 	_exit(4);
 }
@@ -326,15 +339,32 @@ static void faultsig_sigreturnChild(uint64_t psr)
 
 static void faultsig_sigreturnCase(uint64_t psr, int deathAllowed)
 {
-	int status = 0;
-	char msg[96];
-	pid_t pid = faultsig_fork();
+	int status = 0, waited;
+	int markerFd[2];
+	char msg[96], marker;
+	ssize_t got;
+	pid_t pid;
 
+	TEST_ASSERT_EQUAL_INT(0, pipe(markerFd));
+
+	pid = faultsig_fork();
 	if (pid == 0) {
-		faultsig_sigreturnChild(psr);
+		(void)close(markerFd[0]);
+		faultsig_sigreturnChild(psr, markerFd[1]);
 	}
 
-	TEST_ASSERT_EQUAL_INT_MESSAGE(0, faultsig_wait(pid, 5000, &status), "the child neither finished nor died");
+	(void)close(markerFd[1]);
+	waited = faultsig_wait(pid, 5000, &status);
+	/* The child is reaped and its end closed: a byte, or end of file */
+	got = read(markerFd[0], &marker, 1);
+	(void)close(markerFd[0]);
+
+	TEST_ASSERT_EQUAL_INT_MESSAGE(0, waited, "the child neither finished nor died");
+
+	(void)snprintf(msg, sizeof(msg), "psr 0x%x: child status 0x%x, ended before sigreturn", (unsigned int)psr, status);
+	/* Without this a child that died of anything before the call would pass
+	 * the case that allows death */
+	TEST_ASSERT_EQUAL_INT_MESSAGE(1, (int)got, msg);
 
 	(void)snprintf(msg, sizeof(msg), "psr 0x%x: child status 0x%x", (unsigned int)psr, status);
 	if ((deathAllowed != 0) && WIFSIGNALED(status)) {
