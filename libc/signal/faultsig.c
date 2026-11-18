@@ -276,7 +276,10 @@ static void *faultsig_kicker(void *arg)
 
 	for (;;) {
 		(void)usleep(50 * 1000);
-		(void)pthread_kill(faultsig_target, SIGUSR1);
+		if (pthread_kill(faultsig_target, SIGUSR1) != 0) {
+			/* Not 43: a kick that cannot be sent is not the kernel's doing */
+			_exit(6);
+		}
 	}
 
 	return NULL;
@@ -341,7 +344,7 @@ static void faultsig_sigreturnCase(uint64_t psr, int deathAllowed)
 {
 	int status = 0, waited;
 	int markerFd[2];
-	char msg[96], marker;
+	char msg[96], marker = 0;
 	ssize_t got;
 	pid_t pid;
 
@@ -353,10 +356,14 @@ static void faultsig_sigreturnCase(uint64_t psr, int deathAllowed)
 		faultsig_sigreturnChild(psr, markerFd[1]);
 	}
 
-	(void)close(markerFd[1]);
 	waited = faultsig_wait(pid, 5000, &status);
-	/* The child is reaped and its end closed: a byte, or end of file */
-	got = read(markerFd[0], &marker, 1);
+	/* The child is reaped. Queue a byte of our own behind any it wrote, so the
+	 * read below cannot block: the first byte is 's' only if the child wrote. */
+	got = write(markerFd[1], "p", 1);
+	if (got == 1) {
+		got = read(markerFd[0], &marker, 1);
+	}
+	(void)close(markerFd[1]);
 	(void)close(markerFd[0]);
 
 	TEST_ASSERT_EQUAL_INT_MESSAGE(0, waited, "the child neither finished nor died");
@@ -364,7 +371,7 @@ static void faultsig_sigreturnCase(uint64_t psr, int deathAllowed)
 	(void)snprintf(msg, sizeof(msg), "psr 0x%x: child status 0x%x, ended before sigreturn", (unsigned int)psr, status);
 	/* Without this a child that died of anything before the call would pass
 	 * the case that allows death */
-	TEST_ASSERT_EQUAL_INT_MESSAGE(1, (int)got, msg);
+	TEST_ASSERT_TRUE_MESSAGE((got == 1) && (marker == 's'), msg);
 
 	(void)snprintf(msg, sizeof(msg), "psr 0x%x: child status 0x%x", (unsigned int)psr, status);
 	if ((deathAllowed != 0) && WIFSIGNALED(status)) {
