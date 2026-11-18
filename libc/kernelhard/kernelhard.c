@@ -10,6 +10,10 @@
  *           a valid buffer: read(), write() and sigaltstack() must fail with
  *           EFAULT instead of the kernel touching the unmapped part. A buffer
  *           spanning two adjacent mappings stays valid.
+ * kh_sigframe: the signal frame the kernel writes to the user stack holds the
+ *           interrupted context only, never kernel data: no kernel stack
+ *           address, no kernel bits of CPACR_EL1, and a zero FP area when the
+ *           interrupted code had not used the FPU.
  *
  * Copyright 2026 Phoenix Systems
  *
@@ -20,11 +24,13 @@
 
 #include <errno.h>
 #include <signal.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <sys/mman.h>
+#include <sys/ucontext.h>
 #include <sys/wait.h>
 
 #include <unity_fixture.h>
@@ -214,4 +220,176 @@ TEST_GROUP_RUNNER(kh_range)
 	RUN_TEST_CASE(kh_range, read_straddling_hole_faults);
 	RUN_TEST_CASE(kh_range, sigaltstack_straddling_hole_fails);
 	RUN_TEST_CASE(kh_range, adjacent_mappings_stay_valid);
+}
+
+
+#if defined(__aarch64__)
+/*
+ * The aarch64 kernel's cpu_context_t (hal/aarch64/arch/cpu.h), which it writes
+ * just below the interrupted sp as the signal frame, in 64-bit words:
+ *   savesp, cpacr, fpcr, fpsr, freg[64], psr, pc, x[31], sp
+ * The handler checks that it found the frame by comparing x[] with the
+ * registers in its ucontext_t, so a layout change fails the test loudly
+ * instead of making it check the wrong words.
+ */
+#define KH_CTX_WORDS  102
+#define KH_CTX_SAVESP 0
+#define KH_CTX_CPACR  1
+#define KH_CTX_FP     2  /* fpcr, fpsr, freg[64] */
+#define KH_CTX_FPLEN  66
+#define KH_CTX_X      70
+#define KH_CPACR_FPEN (3UL << 20)
+
+/* Only general-purpose registers: code that must not enable the FPU */
+#define KH_NOFP __attribute__((target("general-regs-only")))
+
+static struct {
+	volatile int calls;
+	int found;      /* the frame below the interrupted sp matches the ucontext */
+	int stackPadOk; /* the padding of uc_stack is zero */
+	uint64_t frame[KH_CTX_X];
+} kh_sig;
+
+static struct sigaction kh_oldUsr1, kh_oldUsr2;
+
+
+static KH_NOFP int kh_isKernelAddr(uint64_t v)
+{
+	return ((v >> 48) == 0xffffU) ? 1 : 0;
+}
+
+
+static KH_NOFP void kh_sigframeHandler(int sig, siginfo_t *info, void *ucv)
+{
+	const ucontext_t *uc = ucv;
+	const volatile uint64_t *frame = (const volatile uint64_t *)(uintptr_t)(uc->uc_mcontext.sp - KH_CTX_WORDS * sizeof(uint64_t));
+	const volatile unsigned char *stack = (const volatile unsigned char *)&uc->uc_stack;
+	size_t i;
+
+	(void)sig;
+	(void)info;
+
+	kh_sig.found = 1;
+	for (i = 0; i < 31; i++) {
+		if (frame[KH_CTX_X + i] != uc->uc_mcontext.regs[i]) {
+			kh_sig.found = 0;
+		}
+	}
+
+	/* Word loops, not memcpy: nothing here may touch the FP/SIMD registers */
+	for (i = 0; i < KH_CTX_X; i++) {
+		kh_sig.frame[i] = frame[i];
+	}
+
+	kh_sig.stackPadOk = 1;
+	for (i = offsetof(stack_t, ss_flags) + sizeof(int); i < offsetof(stack_t, ss_size); i++) {
+		if (stack[i] != 0U) {
+			kh_sig.stackPadOk = 0;
+		}
+	}
+
+	kh_sig.calls++;
+}
+
+
+/* A handler is entered with the FPU trapped. This one does not enable it
+ * (raise() is getpid, gettid and tkill: integer code and syscall stubs), so
+ * the frame of the signal it raises is built from a kernel entry that saved
+ * no FP state. */
+static KH_NOFP void kh_sigframeOuter(int sig)
+{
+	(void)sig;
+	(void)raise(SIGUSR1);
+}
+
+
+static void kh_sigframeAssertClean(void)
+{
+	size_t i;
+
+	TEST_ASSERT_EQUAL_INT(1, kh_sig.calls);
+	TEST_ASSERT_TRUE_MESSAGE(kh_sig.found, "signal frame not found below the interrupted sp");
+	TEST_ASSERT_TRUE_MESSAGE(kh_sig.stackPadOk, "uc_stack padding is not zero");
+	TEST_ASSERT_FALSE_MESSAGE(kh_isKernelAddr(kh_sig.frame[KH_CTX_SAVESP]), "kernel stack address in the frame");
+	TEST_ASSERT_EQUAL_HEX64(0, kh_sig.frame[KH_CTX_SAVESP]);
+	TEST_ASSERT_EQUAL_HEX64(0, kh_sig.frame[KH_CTX_CPACR] & ~KH_CPACR_FPEN);
+
+	if ((kh_sig.frame[KH_CTX_CPACR] & KH_CPACR_FPEN) != KH_CPACR_FPEN) {
+		for (i = KH_CTX_FP; i < KH_CTX_FP + KH_CTX_FPLEN; i++) {
+			TEST_ASSERT_FALSE_MESSAGE(kh_isKernelAddr(kh_sig.frame[i]), "kernel address in the FP area");
+			TEST_ASSERT_EQUAL_HEX64_MESSAGE(0, kh_sig.frame[i], "FP area not zero with the FPU unused");
+		}
+	}
+}
+#endif
+
+
+TEST_GROUP(kh_sigframe);
+
+
+TEST_SETUP(kh_sigframe)
+{
+#if defined(__aarch64__)
+	struct sigaction sa;
+
+	memset(&kh_sig, 0, sizeof(kh_sig));
+	memset(&sa, 0, sizeof(sa));
+	sa.sa_sigaction = kh_sigframeHandler;
+	sa.sa_flags = SA_SIGINFO;
+	sigemptyset(&sa.sa_mask);
+	TEST_ASSERT_EQUAL_INT(0, sigaction(SIGUSR1, &sa, &kh_oldUsr1));
+
+	memset(&sa, 0, sizeof(sa));
+	sa.sa_handler = kh_sigframeOuter;
+	sigemptyset(&sa.sa_mask);
+	TEST_ASSERT_EQUAL_INT(0, sigaction(SIGUSR2, &sa, &kh_oldUsr2));
+#endif
+}
+
+
+TEST_TEAR_DOWN(kh_sigframe)
+{
+#if defined(__aarch64__)
+	sigaction(SIGUSR1, &kh_oldUsr1, NULL);
+	sigaction(SIGUSR2, &kh_oldUsr2, NULL);
+#endif
+}
+
+
+/* The main thread: the FPU may or may not be in use */
+TEST(kh_sigframe, frame_holds_no_kernel_data)
+{
+#if defined(__aarch64__)
+	TEST_ASSERT_EQUAL_INT(0, raise(SIGUSR1));
+	kh_sigframeAssertClean();
+#else
+	TEST_IGNORE_MESSAGE("aarch64 only");
+#endif
+}
+
+
+/* A signal raised by code that has not used the FPU: its frame's FP area must
+ * be zero. Before the kernel built the frame field by field, it held whatever
+ * an earlier kernel entry had left in the kernel frame: FP registers saved
+ * then, or the all-ones fill of a new thread's first frame. */
+TEST(kh_sigframe, fp_area_zero_when_fpu_unused)
+{
+#if defined(__aarch64__)
+	TEST_ASSERT_EQUAL_INT(0, raise(SIGUSR2));
+
+	if ((kh_sig.calls == 1) && ((kh_sig.frame[KH_CTX_CPACR] & KH_CPACR_FPEN) == KH_CPACR_FPEN)) {
+		/* The handler was entered with the FPU enabled: the case cannot be set up */
+		TEST_IGNORE_MESSAGE("the FPU was in use before the signal");
+	}
+	kh_sigframeAssertClean();
+#else
+	TEST_IGNORE_MESSAGE("aarch64 only");
+#endif
+}
+
+
+TEST_GROUP_RUNNER(kh_sigframe)
+{
+	RUN_TEST_CASE(kh_sigframe, frame_holds_no_kernel_data);
+	RUN_TEST_CASE(kh_sigframe, fp_area_zero_when_fpu_unused);
 }

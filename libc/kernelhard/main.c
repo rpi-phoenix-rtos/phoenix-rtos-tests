@@ -4,7 +4,8 @@
  * test-libc-kernelhard
  *
  * Kernel hardening checks seen from user space: what a new program inherits
- * across exec, and how the kernel treats buffers that run past a mapping.
+ * across exec, how the kernel treats buffers that run past a mapping, and
+ * what a signal frame exposes.
  *
  * Copyright 2026 Phoenix Systems
  *
@@ -24,6 +25,7 @@ void runner(void)
 {
 	RUN_TEST_GROUP(kh_exec);
 	RUN_TEST_GROUP(kh_range);
+	RUN_TEST_GROUP(kh_sigframe);
 }
 
 
