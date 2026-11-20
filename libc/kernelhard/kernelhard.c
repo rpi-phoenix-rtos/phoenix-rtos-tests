@@ -14,6 +14,8 @@
  *           interrupted context only, never kernel data: no kernel stack
  *           address, no kernel bits of CPACR_EL1, and a zero FP area when the
  *           interrupted code had not used the FPU.
+ * kh_vm:    MAP_CONTIGUOUS memory arrives zeroed; an unaligned access to Device
+ *           memory kills the process instead of faulting for ever (aarch64).
  *
  * Copyright 2026 Phoenix Systems
  *
@@ -392,4 +394,114 @@ TEST_GROUP_RUNNER(kh_sigframe)
 {
 	RUN_TEST_CASE(kh_sigframe, frame_holds_no_kernel_data);
 	RUN_TEST_CASE(kh_sigframe, fp_area_zero_when_fpu_unused);
+}
+
+
+/*
+ * kh_vm: memory the kernel hands out, and faults it must not resolve.
+ *
+ * MAP_CONTIGUOUS memory came straight from the page allocator, with whatever its previous owner
+ * had left in it. And on aarch64 every abort went to the page-fault handler, so an alignment
+ * fault (an unaligned access to Device memory) on a present page was "resolved" and taken again
+ * for ever: the thread spun in the kernel. The Device mapping below is a second mapping of one
+ * of the test's own RAM pages, so nothing outside the test is touched.
+ */
+
+#define KH_CONTIG_SIZE (256 * 1024)
+
+
+TEST_GROUP(kh_vm);
+
+
+TEST_SETUP(kh_vm)
+{
+}
+
+
+TEST_TEAR_DOWN(kh_vm)
+{
+}
+
+
+TEST(kh_vm, contiguous_memory_is_zeroed)
+{
+	unsigned char *p;
+	size_t i, nonzero = 0;
+	int round;
+
+	for (round = 0; round < 4; round++) {
+		p = mmap(NULL, KH_CONTIG_SIZE, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_CONTIGUOUS, -1, 0);
+		TEST_ASSERT_NOT_EQUAL(MAP_FAILED, p);
+		for (i = 0; i < KH_CONTIG_SIZE; i++) {
+			if (p[i] != 0U) {
+				nonzero++;
+			}
+		}
+		/* Leave a pattern for the next allocation, which usually gets the same pages back */
+		memset(p, 0xa5, KH_CONTIG_SIZE);
+		TEST_ASSERT_EQUAL_INT(0, munmap(p, KH_CONTIG_SIZE));
+	}
+	TEST_ASSERT_EQUAL_size_t(0, nonzero);
+}
+
+
+#ifdef __aarch64__
+static void kh_unalignedLoad(volatile void *addr)
+{
+	unsigned int v;
+
+	__asm__ volatile("ldr %w0, [%1]" : "=r"(v) : "r"(addr) : "memory");
+	(void)v;
+}
+#endif
+
+
+TEST(kh_vm, device_alignment_fault_kills)
+{
+#ifdef __aarch64__
+	unsigned char *ram, *dev;
+	addr_t pa;
+	pid_t pid;
+	int status = 0, i;
+
+	ram = mmap(NULL, KH_PAGE, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_CONTIGUOUS, -1, 0);
+	TEST_ASSERT_NOT_EQUAL(MAP_FAILED, ram);
+	ram[0] = 1;
+	pa = va2pa(ram);
+	TEST_ASSERT_NOT_EQUAL(0, pa);
+	dev = mmap(NULL, KH_PAGE, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PHYSMEM | MAP_DEVICE, -1, (off_t)(pa & ~(addr_t)(KH_PAGE - 1)));
+	TEST_ASSERT_NOT_EQUAL(MAP_FAILED, dev);
+
+	pid = fork();
+	TEST_ASSERT_GREATER_OR_EQUAL_INT(0, pid);
+	if (pid == 0) {
+		kh_unalignedLoad(dev + 1);
+		_exit(0); /* not reached: the load must not complete */
+	}
+
+	/* Before the fix the child never came back from the fault: give it 3 s, then stop it */
+	for (i = 0; i < 300; i++) {
+		if (waitpid(pid, &status, WNOHANG) == pid) {
+			break;
+		}
+		usleep(10 * 1000);
+	}
+	if (i == 300) {
+		kill(pid, SIGKILL);
+		waitpid(pid, &status, 0);
+	}
+	munmap(dev, KH_PAGE);
+	munmap(ram, KH_PAGE);
+	TEST_ASSERT_LESS_THAN_INT_MESSAGE(300, i, "an unaligned load from Device memory hung in the kernel");
+	TEST_ASSERT_TRUE(WIFSIGNALED(status));
+#else
+	TEST_IGNORE_MESSAGE("aarch64 only");
+#endif
+}
+
+
+TEST_GROUP_RUNNER(kh_vm)
+{
+	RUN_TEST_CASE(kh_vm, contiguous_memory_is_zeroed);
+	RUN_TEST_CASE(kh_vm, device_alignment_fault_kills);
 }

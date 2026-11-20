@@ -26,6 +26,7 @@ void runner(void)
 	RUN_TEST_GROUP(kh_exec);
 	RUN_TEST_GROUP(kh_range);
 	RUN_TEST_GROUP(kh_sigframe);
+	RUN_TEST_GROUP(kh_vm);
 }
 
 
