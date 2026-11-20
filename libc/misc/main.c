@@ -56,6 +56,7 @@ void runner(void)
 	RUN_TEST_GROUP(misc_rusage_times);
 	RUN_TEST_GROUP(posix_options);
 	RUN_TEST_GROUP(va2pa);
+	RUN_TEST_GROUP(misc_mntent);
 #endif
 }
 
