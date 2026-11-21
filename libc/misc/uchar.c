@@ -9,10 +9,11 @@
  * TESTED:
  *    - mbrtoc16(), c16rtomb(), mbrtoc32(), c32rtomb()
  *
- * ICU includes <uchar.h> for char16_t and the conversions. libphoenix's
- * multibyte layer is the C locale (one byte, one character), and these follow
- * it: a byte becomes the code point of the same value, and only code points up
- * to U+00FF can be written back. The common cases hold on glibc as well.
+ * ICU includes <uchar.h> for char16_t and the conversions. These run in the
+ * C locale, where libphoenix's multibyte layer is one byte, one character, and
+ * the conversions follow it: a byte becomes the code point of the same value,
+ * and only code points up to U+00FF can be written back (UTF-8 is tested in
+ * locale_utf8.c). The common cases hold on glibc as well.
  *
  * Copyright 2026 Phoenix Systems
  *
