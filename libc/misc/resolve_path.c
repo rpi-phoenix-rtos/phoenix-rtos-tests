@@ -511,6 +511,57 @@ TEST(resolve_path, symlink_rename)
 }
 
 
+/* rename() of a name onto itself, or onto another link of the same file, is a no-op (POSIX) */
+TEST(resolve_path, rename_same_file)
+{
+	struct stat st;
+
+	TEST_ASSERT_EQUAL_INT(0, chdir(prefix));
+	unlink("rn_same");
+	unlink("rn_link");
+
+	create_file("rn_same", file_contents);
+	TEST_ASSERT_EQUAL_INT(0, rename("rn_same", "rn_same"));
+	check_file_contents(file_contents, "rn_same");
+	TEST_ASSERT_EQUAL_INT(0, rename("rn_same", "./rn_same"));
+	check_file_contents(file_contents, "rn_same");
+
+	if (link("rn_same", "rn_link") == 0) {
+		TEST_ASSERT_EQUAL_INT(0, rename("rn_same", "rn_link"));
+		TEST_ASSERT_EQUAL_INT(0, stat("rn_same", &st));
+		check_file_contents(file_contents, "rn_link");
+		TEST_ASSERT_EQUAL_INT(0, unlink("rn_link"));
+	}
+
+	TEST_ASSERT_EQUAL_INT(0, unlink("rn_same"));
+}
+
+
+/* rename() replaces an existing destination; a failed rename() leaves it intact */
+TEST(resolve_path, rename_replace)
+{
+	static const char other[] = "other contents";
+
+	TEST_ASSERT_EQUAL_INT(0, chdir(prefix));
+	unlink("rn_src");
+	unlink("rn_dst");
+
+	create_file("rn_src", file_contents);
+	create_file("rn_dst", other);
+	TEST_ASSERT_EQUAL_INT(0, rename("rn_src", "rn_dst"));
+	check_file_open_errno(ENOENT, "rn_src");
+	check_file_contents(file_contents, "rn_dst");
+
+	errno = 0;
+	TEST_ASSERT_EQUAL_INT(-1, rename("rn_src", "rn_dst"));
+	TEST_ASSERT_EQUAL_INT(ENOENT, errno);
+	check_file_contents(file_contents, "rn_dst");
+	check_file_open_errno(ENOENT, "rn_dst.~rename~");
+
+	TEST_ASSERT_EQUAL_INT(0, unlink("rn_dst"));
+}
+
+
 /* check if path temporarily longer than PATH_MAX while resolving won't crash */
 TEST(resolve_path, symlink_long_resolution)
 {
@@ -635,6 +686,8 @@ TEST_GROUP_RUNNER(resolve_path)
 	RUN_TEST_CASE(resolve_path, symlink_dir);
 	RUN_TEST_CASE(resolve_path, symlink_loop);
 	RUN_TEST_CASE(resolve_path, symlink_rename);
+	RUN_TEST_CASE(resolve_path, rename_same_file);
+	RUN_TEST_CASE(resolve_path, rename_replace);
 	RUN_TEST_CASE(resolve_path, symlink_long_resolution);
 	RUN_TEST_CASE(resolve_path, symlink_target_does_not_fit);
 }
