@@ -1855,6 +1855,9 @@ TEST_SETUP(stdio_fflush)
 
 TEST_TEAR_DOWN(stdio_fflush)
 {
+	/* stdio_fflush_input_syncs_offset creates the test file: remove it even if the
+	 * test failed, or every later run finds it and fopen(..., "r") stops failing */
+	remove(STDIO_TEST_FILENAME);
 }
 
 
