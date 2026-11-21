@@ -500,8 +500,63 @@ TEST(kh_vm, device_alignment_fault_kills)
 }
 
 
+/* Private non-cacheable pages copied at fork(): each process must see its own
+ * data, intact, on both sides. The copy's cache maintenance runs while the
+ * parent's tables are live (it must work through the physical page, not the
+ * child's virtual address). */
+TEST(kh_vm, uncached_private_survives_fork)
+{
+	const size_t pages = 4u, len = pages * KH_PAGE;
+	unsigned int *p;
+	size_t i, n = len / sizeof(*p);
+	pid_t pid;
+	int round, status, bad;
+
+	p = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_UNCACHED, -1, 0);
+	TEST_ASSERT_NOT_EQUAL(MAP_FAILED, p);
+
+	for (round = 0; round < 20; round++) {
+		for (i = 0; i < n; i++) {
+			p[i] = 0x5a000000u ^ ((unsigned int)round << 16) ^ (unsigned int)i;
+		}
+
+		pid = fork();
+		TEST_ASSERT_GREATER_OR_EQUAL_INT(0, pid);
+		if (pid == 0) {
+			bad = 0;
+			for (i = 0; i < n; i++) {
+				if (p[i] != (0x5a000000u ^ ((unsigned int)round << 16) ^ (unsigned int)i)) {
+					bad = 1;
+				}
+				p[i] = 0xa5a5a5a5u;
+			}
+			for (i = 0; i < n; i++) {
+				if (p[i] != 0xa5a5a5a5u) {
+					bad = 1;
+				}
+			}
+			_exit(bad);
+		}
+
+		status = -1;
+		TEST_ASSERT_EQUAL_INT(pid, waitpid(pid, &status, 0));
+		TEST_ASSERT_TRUE_MESSAGE(WIFEXITED(status), "the child faulted on its copy");
+		TEST_ASSERT_EQUAL_INT_MESSAGE(0, WEXITSTATUS(status), "the child saw wrong data");
+		for (i = 0; i < n; i++) {
+			if (p[i] != (0x5a000000u ^ ((unsigned int)round << 16) ^ (unsigned int)i)) {
+				break;
+			}
+		}
+		TEST_ASSERT_EQUAL_MESSAGE(n, i, "the child's writes reached the parent");
+	}
+
+	munmap(p, len);
+}
+
+
 TEST_GROUP_RUNNER(kh_vm)
 {
 	RUN_TEST_CASE(kh_vm, contiguous_memory_is_zeroed);
 	RUN_TEST_CASE(kh_vm, device_alignment_fault_kills);
+	RUN_TEST_CASE(kh_vm, uncached_private_survives_fork);
 }
