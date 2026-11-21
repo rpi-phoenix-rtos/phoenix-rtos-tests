@@ -32,6 +32,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/mman.h>
+#include <sys/msg.h>
 #include <sys/ucontext.h>
 #include <sys/wait.h>
 
@@ -554,9 +555,34 @@ TEST(kh_vm, uncached_private_survives_fork)
 }
 
 
+/* memExportMapped(): an export nobody maps counts 0; withdrawn or unknown -> -ENOENT */
+TEST(kh_vm, export_mapped_counts)
+{
+	uint32_t port;
+	oid_t oid;
+	void *p;
+
+	TEST_ASSERT_EQUAL_INT(0, portCreate(&port));
+	p = mmap(NULL, KH_PAGE, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_CONTIGUOUS, -1, 0);
+	TEST_ASSERT_NOT_EQUAL(MAP_FAILED, p);
+
+	oid.port = port;
+	oid.id = 7;
+	TEST_ASSERT_EQUAL_INT(-ENOENT, memExportMapped(&oid));
+	TEST_ASSERT_EQUAL_INT(0, memExport(&oid, p, KH_PAGE));
+	TEST_ASSERT_EQUAL_INT(0, memExportMapped(&oid));
+	TEST_ASSERT_EQUAL_INT(0, memUnexport(&oid));
+	TEST_ASSERT_EQUAL_INT(-ENOENT, memExportMapped(&oid));
+
+	munmap(p, KH_PAGE);
+	portDestroy(port);
+}
+
+
 TEST_GROUP_RUNNER(kh_vm)
 {
 	RUN_TEST_CASE(kh_vm, contiguous_memory_is_zeroed);
 	RUN_TEST_CASE(kh_vm, device_alignment_fault_kills);
 	RUN_TEST_CASE(kh_vm, uncached_private_survives_fork);
+	RUN_TEST_CASE(kh_vm, export_mapped_counts);
 }
