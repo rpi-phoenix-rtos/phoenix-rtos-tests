@@ -3617,6 +3617,52 @@ static void unix_fd_per_message(int type)
 }
 
 
+/*
+ * On a stream socket the descriptors arrive in the order they were sent, also when
+ * several sends (one with two descriptors, one with none) are read at once. A
+ * Wayland client sends a wl_shm pool and a dma-buf in requests queued together; a
+ * compositor given them in another order imports the shm pool as the dma-buf
+ * (KNOWN-ISSUES C18 in the Raspberry Pi 4 port).
+ */
+TEST(test_unix_socket, fd_order_stream)
+{
+	int pair[2], sfd[4], rfd[MAX_FD_CNT];
+	long got[8];
+	char rb[16];
+	size_t rcnt, ngot = 0, i;
+	ssize_t n, total = 0;
+
+	TEST_ASSERT_EQUAL_INT(0, socketpair(AF_UNIX, SOCK_STREAM, 0, pair));
+	unix_sized_files(sfd, 4);   /* sizes 1, 2, 3, 4 */
+
+	TEST_ASSERT_EQUAL_INT(1, msg_send(pair[0], "A", 1, &sfd[0], 1));
+	TEST_ASSERT_EQUAL_INT(1, msg_send(pair[0], "B", 1, &sfd[1], 1));
+	TEST_ASSERT_EQUAL_INT(1, msg_send(pair[0], "C", 1, NULL, 0));
+	TEST_ASSERT_EQUAL_INT(1, msg_send(pair[0], "D", 1, &sfd[2], 2));
+	TEST_ASSERT_EQUAL_INT(0, close_files(sfd, 4));
+
+	while (total < 4) {
+		n = msg_recv(pair[1], rb + total, sizeof(rb) - (size_t)total, rfd, &rcnt);
+		TEST_ASSERT_GREATER_THAN_INT(0, (int)n);
+		for (i = 0; (i < rcnt) && (ngot < sizeof(got) / sizeof(got[0])); i++) {
+			got[ngot++] = unix_file_size(rfd[i]);
+		}
+		TEST_ASSERT_EQUAL_INT(0, close_files(rfd, rcnt));
+		total += n;
+	}
+
+	TEST_ASSERT_EQUAL_MEMORY("ABCD", rb, 4);
+	TEST_ASSERT_EQUAL_INT_MESSAGE(4, (int)ngot, "descriptors received");
+	for (i = 0; i < 4; i++) {
+		TEST_ASSERT_EQUAL_INT_MESSAGE((int)i + 1, (int)got[i], "descriptor order");
+	}
+
+	close(pair[0]);
+	close(pair[1]);
+	TEST_ASSERT_EQUAL_INT(0, unlink_files(4));
+}
+
+
 TEST(test_unix_socket, fd_per_message)
 {
 	unix_fd_per_message(SOCK_SEQPACKET);
@@ -4370,6 +4416,7 @@ TEST_GROUP_RUNNER(test_unix_socket)
 	RUN_TEST_CASE(test_unix_socket, sockopt_type);
 	RUN_TEST_CASE(test_unix_socket, sockopt_acceptconn);
 	RUN_TEST_CASE(test_unix_socket, fd_per_message);
+	RUN_TEST_CASE(test_unix_socket, fd_order_stream);
 	RUN_TEST_CASE(test_unix_socket, fd_not_carried_over);
 	RUN_TEST_CASE(test_unix_socket, message_4096);
 	RUN_TEST_CASE(test_unix_socket, getsockname_unnamed);
