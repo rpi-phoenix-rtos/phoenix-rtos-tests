@@ -3663,6 +3663,64 @@ TEST(test_unix_socket, fd_order_stream)
 }
 
 
+/*
+ * recvmsg() into more than one iovec reports the control data it received, as with
+ * one iovec. A ring-buffered reader (libwayland) reads into two iovecs when its ring
+ * wraps and keeps its control buffer between reads: if msg_controllen still says
+ * "full" after a read that brought no descriptors, the reader decodes the previous
+ * read's SCM_RIGHTS again and takes a descriptor it already has for a new one
+ * (KNOWN-ISSUES C18 in the Raspberry Pi 4 port).
+ */
+TEST(test_unix_socket, fd_recvmsg_iovecs_controllen)
+{
+	union {
+		struct cmsghdr align;
+		char buf[CMSG_SPACE(sizeof(int))];
+	} ctl;
+	char b0[1], b1[4];
+	struct iovec iov[2];
+	struct msghdr msg;
+	struct cmsghdr *cm;
+	int pair[2], sfd[1], fd;
+
+	TEST_ASSERT_EQUAL_INT(0, socketpair(AF_UNIX, SOCK_STREAM, 0, pair));
+	unix_sized_files(sfd, 1);
+	TEST_ASSERT_EQUAL_INT(1, msg_send(pair[0], "A", 1, sfd, 1));
+	TEST_ASSERT_EQUAL_INT(0, close_files(sfd, 1));
+
+	iov[0].iov_base = b0;
+	iov[0].iov_len = sizeof(b0);
+	iov[1].iov_base = b1;
+	iov[1].iov_len = sizeof(b1);
+	memset(&msg, 0, sizeof(msg));
+	msg.msg_iov = iov;
+	msg.msg_iovlen = 2;
+	msg.msg_control = ctl.buf;
+	msg.msg_controllen = sizeof(ctl.buf);
+	TEST_ASSERT_EQUAL_INT(1, recvmsg(pair[1], &msg, 0));
+	TEST_ASSERT_EQUAL_CHAR('A', b0[0]);
+	cm = CMSG_FIRSTHDR(&msg);
+	TEST_ASSERT_NOT_NULL_MESSAGE(cm, "the descriptor sent with the first message");
+	TEST_ASSERT_EQUAL_INT(SCM_RIGHTS, cm->cmsg_type);
+	TEST_ASSERT_GREATER_OR_EQUAL_INT_MESSAGE(CMSG_LEN(sizeof(int)), msg.msg_controllen, "msg_controllen after one descriptor");
+	memcpy(&fd, CMSG_DATA(cm), sizeof(fd));
+	TEST_ASSERT_EQUAL_INT(1, unix_file_size(fd));
+	TEST_ASSERT_EQUAL_INT(0, close(fd));
+
+	/* The same control buffer, still holding the first read's SCM_RIGHTS */
+	TEST_ASSERT_EQUAL_INT(1, send(pair[0], "B", 1, 0));
+	msg.msg_controllen = sizeof(ctl.buf);
+	TEST_ASSERT_EQUAL_INT(1, recvmsg(pair[1], &msg, 0));
+	TEST_ASSERT_EQUAL_CHAR('B', b0[0]);
+	TEST_ASSERT_EQUAL_INT_MESSAGE(0, msg.msg_controllen, "a read without descriptors left msg_controllen as passed in");
+	TEST_ASSERT_NULL(CMSG_FIRSTHDR(&msg));
+
+	close(pair[0]);
+	close(pair[1]);
+	TEST_ASSERT_EQUAL_INT(0, unlink_files(1));
+}
+
+
 TEST(test_unix_socket, fd_per_message)
 {
 	unix_fd_per_message(SOCK_SEQPACKET);
@@ -4417,6 +4475,7 @@ TEST_GROUP_RUNNER(test_unix_socket)
 	RUN_TEST_CASE(test_unix_socket, sockopt_acceptconn);
 	RUN_TEST_CASE(test_unix_socket, fd_per_message);
 	RUN_TEST_CASE(test_unix_socket, fd_order_stream);
+	RUN_TEST_CASE(test_unix_socket, fd_recvmsg_iovecs_controllen);
 	RUN_TEST_CASE(test_unix_socket, fd_not_carried_over);
 	RUN_TEST_CASE(test_unix_socket, message_4096);
 	RUN_TEST_CASE(test_unix_socket, getsockname_unnamed);
